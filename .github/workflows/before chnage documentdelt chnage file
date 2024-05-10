@@ -1,0 +1,325 @@
+import { LightningElement, track, api, wire } from 'lwc';
+import { NavigationMixin } from 'lightning/navigation';
+import UserNameFld from '@salesforce/schema/User.Name';
+import { getRecord, getFieldValue } from 'lightning/uiRecordApi';
+import { refreshApex } from "@salesforce/apex";
+import Id from '@salesforce/user/Id';
+
+/* unsupported files deleted - start*/
+import getUnsupportedFiless from '@salesforce/apex/DocumentDeletionController.getUnsupportedDocuments';
+import deleteDocuments from '@salesforce/apex/DocumentDeletionController.deleteDocumentsById';
+import enableDeleteButton from '@salesforce/apex/DocumentDeletionController.enableDeleteButton';
+/* unsupported files deleted - End*/
+
+import getRelatedAttachments from '@salesforce/apex/DocumentUploadLWCController.getRelatedAttachments';
+import processContentDocument from '@salesforce/apex/DocumentUploadLWCController.processContentDocument';
+import contentDocumentFile from '@salesforce/apex/DocumentUploadLWCController.contentDocumentFile';
+import getCaseContractDetails from '@salesforce/apex/DocumentUploadLWCController.getCaseContractDetails';
+import getDocumentTypesFromMetadata from '@salesforce/apex/DocumentUploadLWCController.getDocumentTypesFromMetadata'; //WHCRM-82052
+import { ShowToastEvent } from 'lightning/platformShowToastEvent';
+import uploadToDMS from '@salesforce/label/c.Upload_to_DMS';
+import status from '@salesforce/label/c.status_of_uploaded_file';
+import fileName from '@salesforce/label/c.File_Name_for_Upload_to_DMS';
+import upload from '@salesforce/label/c.Upload_button';
+import errormsg from '@salesforce/label/c.error_message_for_file_size';
+export default class UploadDocumentsToDMS extends NavigationMixin(LightningElement) {
+
+    label = {
+        uploadToDMS, status, fileName, upload, errormsg
+    };
+		SupportedFileTypes = '';
+    @api recordId;
+    @track caseFiles;
+    @track fileId;
+    @track isModalOpen = false;
+    userId = Id;
+    @track currentUserName;
+    @track DMSButtonRecordId;
+    @track contentVersionId;
+    @track description;
+    @track docoption;
+    @track agreementId;
+    @track licensePlate;
+    @track parsedvalue;
+    @track wiredResult;
+    @track fileSize;
+    @track fileName;
+    @track documentType;
+    @track url;
+    @track checkUKBmwUnit;
+    @track caseFileDetails = [];
+
+    /* unsupported files deleted - start*/
+     @track isLoader = false;
+     @track isDisableDelete = true;
+     @track caseUnsuppotedFiles = [];
+     _wiredUnsupportedResult;
+     @track isShowUnsupportedFiles = false;
+   /* unsupported files deleted - End*/
+
+		@wire(getRecord, { recordId: '$recordId', fields: ['Case.BMW_Unit__c'] })
+    wiredRecord({ error, data }) {
+        if (data) {
+            const picklistValue = data.fields.BMW_Unit__c.value;
+            if (picklistValue === 'BE-NFSC') {
+                this.SupportedFileTypes = 'Supported FileTypes: bpm,doc,docx,Eform,eml,gif,html,jpeg,jpg,pdf,png,tif,tiff,txt,xls,xlsx';
+            } else {
+                this.SupportedFileTypes = 'Supported FileTypes: txt,pdf,msg,jpg,png,jpeg,doc,docx,xls,bmp,tif,tiff,rtf,gif,xlsx';
+            }
+        } else if (error) {
+            console.error(error);
+        }
+    }
+		
+    @wire(getDocumentTypesFromMetadata, {})
+    getDocumentTypeMetadata;
+    @wire(getRecord, { recordId: Id, fields: [UserNameFld] })
+    userDetails({ error, data }) {
+        if (data) {
+            this.currentUserName = data.fields.Name.value;
+        } else if (error) {
+            this.error = error;
+        }
+    }
+
+
+    @wire(getRelatedAttachments, { caseId: '$recordId' })
+    ApexResponse(result) {
+        this.url = '/lightning/r/Case/' + this.recordId + '/related/AttachedContentDocuments/view';        
+        if (result.data) {
+            this.caseFiles = result.data;
+            for (let i = 0; i < this.caseFiles.length; i++) {
+                let fileDetails = {};
+                fileDetails['disableButton'] = this.caseFiles[i].ContentDocument.LatestPublishedVersion.Upload_Status__c;
+                fileDetails['fileInfo'] = this.caseFiles[i];
+                this.caseFileDetails.push(fileDetails);
+            }
+        }
+        this.wiredResult = result;
+        refreshApex(this.wiredResult);
+    }
+    /* unsupported files deleted - start*/
+    @wire(enableDeleteButton, {})
+    wiredeleteshow({ error, data }) {
+        if (data) {
+            this.isDisableDelete = data ? false : true;
+        } else if (error) {
+            this.error = error;
+        }
+    } 
+    @wire(getUnsupportedFiless, { caseId: '$recordId' })
+    wireddata(result) {        
+        if (result.data) {
+            console.log('result :: ', result.data);
+            this.caseUnsuppotedFiles = result.data;
+            this._wiredUnsupportedResult = result;
+        }
+    }
+
+    handleClickShowUnsupportedFiles(event) {
+        this.isShowUnsupportedFiles = event.target.checked;
+    }
+
+    handleDeleteSupportedFiles(event){
+        this.isLoader = true;
+        let docId = event.target.dataset.recordId;   
+       deleteDocuments({ docId: docId })
+         .then(result => {
+           if(result && result == 'success'){           
+               this.showTostMessage('Success!!', 'Successfully File Deleted', 'success'); 
+               this.isLoader = false;               
+               return refreshApex(this.wiredResult);
+           }else{
+               this.isLoader = false; 
+               this.showTostMessage('Error', result, 'error');
+           }
+         })
+         .catch(error => {
+           console.error('Error:', error);
+           this.isLoader = false; 
+           this.showTostMessage('Error', error, 'error');
+       });
+
+    }
+
+    handleDeleteUnsupportedFiles(event){
+        this.isLoader = true;
+        let docId = event.target.dataset.recordId;   
+       deleteDocuments({ docId: docId })
+         .then(result => {
+           if(result && result == 'success'){           
+               this.showTostMessage('Success!!', 'Successfully File Deleted', 'success'); 
+               this.isLoader = false;               
+               return refreshApex(this._wiredUnsupportedResult);
+           }else{
+               this.isLoader = false; 
+               this.showTostMessage('Error', result, 'error');
+           }
+         })
+         .catch(error => {
+           console.error('Error:', error);
+           this.isLoader = false; 
+           this.showTostMessage('Error', error, 'error');
+       });
+
+    }
+     /* unsupported files deleted - end*/
+    handleClick(event) {
+        this.fileId = event.target.dataset.recordId;
+        console.log('Id', this.fileId);
+        // Navigate to View Selected File Page
+        this[NavigationMixin.Navigate]({
+            type: 'standard__recordPage',
+            attributes: {
+                recordId: this.fileId,
+                objectApiName: 'ContentDocument',
+                actionName: 'view'
+            },
+        });
+    }
+    descChange(event) {
+        this.description = event.target.value;
+
+    }
+    
+    //WHCRM-82052: Start
+    handleChange(event){
+        this.description = event.detail.value;
+    }
+
+    get documentTypeOptions(){
+        this.getDocumentTypeMetadata;
+        let options = [];
+        for (let key in this.getDocumentTypeMetadata.data) {
+            let value = this.getDocumentTypeMetadata.data[key];
+            let option = {};
+            option.label = value;
+            option.value = value;
+            options.push(option);
+        }
+        return options;
+    }//WHCRM-82052: End
+    
+    fileNameChange(event) {
+        this.fileName = event.target.value;
+    }
+    handleButtonClick(event) {
+        this.DMSButtonRecordId = event.target.value;
+
+        for (let i = 0; i < this.caseFileDetails.length; i++) {
+            if (this.caseFileDetails[i].fileInfo.ContentDocumentId == this.DMSButtonRecordId) {
+                this.caseFileDetails[i].disableButton = true;
+            }
+
+        }
+        getCaseContractDetails({ caseId: this.recordId })
+            .then(result => {
+                if (result.BMW_Unit__c == 'UK-NFSC') {
+                    this.checkUKBmwUnit = true;
+                }
+                if (result.BMW_Unit__c == 'BE-NFSC') {
+                    this.checkUKBmwUnit = false;
+                }
+                if (result.FS_Contract__c == null) {
+                    this.showWarning();
+                    this.isModalOpen = false;
+                    for (let i = 0; i < this.caseFileDetails.length; i++) {
+                        if (this.caseFileDetails[i].fileInfo.ContentDocumentId == this.DMSButtonRecordId) {
+                            this.caseFileDetails[i].disableButton = false;
+                        }
+                    }
+				}
+				
+                for(var key in result){
+                    if(result.FS_Contract__c!= null){
+                        this.agreementId = result['FS_Contract__r'].CMS_Identifier__c;
+                    if(result.FS_Contract__r.License_Plate__c != null){
+                            this.licensePlate = result['FS_Contract__r'].License_Plate__c;//WHCRM-67044
+                        }
+                    }
+                }
+            })
+            .catch(error => {
+                alert(error);
+            });
+
+        contentDocumentFile({ contentDocumentId: this.DMSButtonRecordId })
+            .then(result => {
+                for (var key in result) {
+                    this.fileSize = result.ContentSize;
+                    this.fileName = result.Title;
+                    this.contentVersionId = result['LatestPublishedVersion'].Id;
+                }
+            })
+            .catch(error => {
+                alert(error);
+            });
+            this.isModalOpen = true;
+    }
+    showWarning(){
+        this.dispatchEvent(new ShowToastEvent({
+            variant:'error',
+            title:'Error!',
+            message:'Please link a valid contract to the case in order to upload a file to DMS',
+        }));  
+    }
+
+    submitDetails(event) {
+        const validInput = [...this.template.querySelectorAll('lightning-input')]
+            .reduce((validSoFar, inputField) => {
+                inputField.reportValidity();
+                return validSoFar && inputField.checkValidity();
+            }, true);
+        if (validInput) { console.log('desc--'+this.description);
+            processContentDocument({ contVersId: this.contentVersionId, caseId: this.recordId, descr: this.description, fileName: this.fileName })
+                .then(result => {
+
+                    var returnStatus = JSON.parse(result);
+
+                    if (returnStatus.isSentToDMS === true) {
+                        this.dispatchEvent(
+                            new ShowToastEvent({
+                                title: 'Success!!',
+                                message: returnStatus.message,
+                                variant: 'success'
+                            }),
+                        );
+                    }
+                    else if (returnStatus.isSentToDMS === false) {
+                        this.dispatchEvent(
+                            new ShowToastEvent({
+                                title: 'Error',
+                                message: returnStatus.message,
+                                variant: 'error'
+                            }),
+                        );
+                    }
+                    //refreshApex(this.wiredResult);
+                })
+                .catch(error => {
+                    alert(error);
+                });
+            this.isModalOpen = false;
+        }
+        //refreshApex(this.wiredResult);
+    }
+    closeModal() {
+        for (let i = 0; i < this.caseFileDetails.length; i++) {
+            if (this.caseFileDetails[i].fileInfo.ContentDocumentId == this.DMSButtonRecordId) {
+                this.caseFileDetails[i].disableButton = false;
+            }
+        }
+        this.isModalOpen = false;
+    }
+ /* unsupported files deleted - start*/
+    showTostMessage(title, message, variant) {        
+         const event = new ShowToastEvent({
+            title: title,
+            message: message,
+            variant: variant,
+            mode: 'dismissable'
+         });
+         this.dispatchEvent(event);
+    }
+     /* unsupported files deleted - end*/
+}
