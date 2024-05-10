@@ -1,0 +1,747 @@
+@RestResource(urlMapping='/v1/VehicleOKURelationHandler/*' )
+global with sharing class VehicleOKURelationRestHandler {
+    
+    public static Map<String, Asset> vinVehicleMap = new Map<String,Asset>();
+    public static Map<String, Account> topDriveAccountMap = new Map<String,Account>();
+    public static Map<String, Account> gcidAccountMap = new Map<String,Account>();
+    public static List<AssetUserRelation__c> additionalUserLst = new List<AssetUserRelation__c>();
+
+    public static List<Asset> updatedVehicles = new List<Asset>();
+    public static List<OKU_History__c> createHistoryRecords = new List<OKU_History__c>();
+    public static List<AssetUserRelation__c> deleteAssetUserRelation = new List<AssetUserRelation__c>();
+    public static List<AssetUserRelation__c> newAssetUserRelation = new List<AssetUserRelation__c>();
+    public static List<AssetUserRelation__c> updatedAssetUserRelation = new List<AssetUserRelation__c>();
+    public static map<string,Asset> mapAssetUpdate = new map<string,Asset>();
+    public static List<OKU_History__c> existingHistoryRecords = new List<OKU_History__c>();
+    public static Map<String,List<OKU_History__c>> mapVinToHistoryRecords = new Map<String,List<OKU_History__c>>();
+    public static List<OKU_History__c> historyRecordsToBeDeleted = new List<OKU_History__c>();
+    public static Boolean reportErrors = true;
+    public static List<String> errorMessages = new List<String>();
+    public static Map<String,String> assetIdVsVIN = new Map<String,String>();
+    public static Map<String,responseWrapper> retuenMapForAsset = new Map<String,responseWrapper>();
+	
+    @HttpPost
+    global static List<ResponseWrapper> vehicleOKUHandler() {
+
+        ResponseWrapper returnResponseInst = new ResponseWrapper();
+        List<ResponseWrapper> returnResponseList = new List<ResponseWrapper>();
+        
+        RestRequest req = RestContext.request;
+
+        if(req.requestBody.toString() == null || req.requestBody.toString() == ''){
+            // If body is null
+            returnResponseInst.Status = '400';
+            returnResponseInst.Message = 'Body is empty';
+            returnResponseList.add(returnResponseInst);
+            return returnResponseList;
+        }
+
+        String jsonrequest = req.requestBody.toString(); // Payload data from IL
+
+        boolean isexecute =true;
+    	Map<string,VehicleOKURelationRestHandler.vehicleOKU> MapofVinToEventObj = new Map<string,VehicleOKURelationRestHandler.vehicleOKU>();
+        String DebugStart = '## ';    
+        System.debug(DebugStart + ' Method entered');
+
+        List<vehicleOKU> vehicleOKUWrapperList = new List<vehicleOKU>();
+        try {
+            vehicleOKUWrapperList = (List<vehicleOKU>) JSON.deserialize(jsonrequest, List<vehicleOKU>.class);   
+        } catch (Exception ex) {
+            system.debug('Exception------'+ex.getMessage());
+            returnResponseInst.Status = '500';
+            returnResponseInst.Message = ex.getMessage();
+            returnResponseList.add(returnResponseInst);
+            return returnResponseList;
+        }
+
+
+        System.debug(DebugStart + ' Method entered');
+        //ID defaultOwnerID =  '0055E000004F8gCQAS'; 
+        // Id defaultOwnerID = Call to other class to locate the Default Owner to be used to update the system 
+        prepareData(vehicleOKUWrapperList);
+        set<String> VehicleVins = new set<String>(); //WHCRM-56395
+        //WHCRM-64879
+        Asset curVehicle;
+        String res;
+        map<String,Vehicle_Mapping__c> mapVehicleMapping = Vehicle_Mapping__c.getAll();
+        Map<String,String> mapFinalVehicle = new Map<string,string>();
+
+        for(VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance: vehicleOKUWrapperList){
+            curVehicle = vinVehicleMap.get(vehicleOKUInstance.VINLong);
+            System.debug('curVehicle check'+curVehicle);
+            if(curVehicle == null){
+                VehicleVins.add(vehicleOKUInstance.VINLong);
+            }
+        }
+         System.debug('test 1Number of Queries used in this apex code so far: ' + Limits.getQueries());
+        for(String vin :VehicleVins){
+            if(vin != null){
+                System.debug('Entring muleintegration method'+vin);
+                res = MuleIntegration.getVehicleDataDetails(VIN);
+                 System.debug('Test 2 Number of Queries used in this apex code so far: ' + Limits.getQueries());
+            }
+        }
+        if(curVehicle == null && res !=null && !res.startsWithIgnoreCase('ErrorMIS')){
+            JSONParser parser = JSON.createParser(res);
+            
+          while (parser.nextToken() != null) {
+              
+                if(mapVehicleMapping.containsKey(parser.getText()))
+                {
+                    string webservicefield = parser.getText();
+                    parser.nextToken();
+                    
+                    string webserviceValue = (parser.getText() != 'null')? parser.getText():null;                    
+                    mapFinalVehicle.put(mapVehicleMapping.get(webservicefield).Salesforce_Field_Name__c,webserviceValue);
+                }
+          }
+            if(!mapFinalVehicle.isEmpty()) 
+                RequestHelper.createAsset(mapFinalVehicle);
+            }
+        prepareData(vehicleOKUWrapperList);
+        //WHCRM-64879
+        for(VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance: vehicleOKUWrapperList){
+            system.debug('vehicleOKUInstance------'+vehicleOKUInstance);
+            responseWrapper rw = new responseWrapper();
+            rw.VIN = vehicleOKUInstance.VINLong;
+            rw.GCID = vehicleOKUInstance.GCID;
+            rw.status = '400';
+            if (vehicleOKUInstance.VINLong != null && vehicleOKUInstance.VINLong.trim() != '') {
+                retuenMapForAsset.put(vehicleOKUInstance.VINLong, rw);   
+            } else {
+                rw.message = String.valueOf(vehicleOKUInstance);
+                returnResponseList.add(rw);
+            }
+            
+            //Note(Vinod) : below logic will execute for BE market
+            //WHCRM-74380 added end date not null condition
+            if((null != vehicleOKUInstance.sourceSystem && ((vehicleOKUInstance.sourceSystem.equals('FEBIAC') && vehicleOKUInstance.endDate != null) || vehicleOKUInstance.sourceSystem.equals('DIV')))){
+                //isexecute = false;
+                //WHCRM-42064: Logic moved to market specific class
+                BEHandleOKURelationship.afterInsert(vinVehicleMap, MapofVinToEventObj, vehicleOKUInstance, errorMessages);              
+          	}
+            else{
+            boolean validateSuccess = validateVehicleAndAccount(vehicleOKUInstance, rw);
+
+            if(!validateSuccess){
+                continue;
+            }
+
+            boolean isDeleteEvent = false;
+            
+            if(null != vehicleOKUInstance.endDate){
+                isDeleteEvent = true;
+            }
+
+            Asset currVehicle;
+
+            //Added null check for WHCRM-79563
+            if(mapAssetUpdate.containsKey(vehicleOKUInstance.VINLong) && mapAssetUpdate.get(vehicleOKUInstance.VINLong) != null)
+            {
+                currVehicle = mapAssetUpdate.get(vehicleOKUInstance.VINLong);
+            }
+            //Added else condition for WHCRM-66992
+            else if(vinVehicleMap.get(vehicleOKUInstance.VINLong) != null)
+            {
+                currVehicle = vinVehicleMap.get(vehicleOKUInstance.VINLong);
+            }
+            else{
+                rw.Message = 'Given VIN does not exist';
+                retuenMapForAsset.put(vehicleOKUInstance.VINLong, rw);
+                continue;
+            }
+            //WHCRM-64879
+             /* WHCRM-56395 - Changes done to Automatic import of VIN - Start */
+             /*if(currVehicle == null)
+             {                
+                 VehicleVins.add(vehicleOKUInstance.VINLong);
+                 RequestHelper.createAssetforDER(VehicleVins);
+             }*/
+            /* WHCRM-56395 - Changes done to Automatic import of VIN - End */
+           //WHCRM-64879
+            Account accountBasedOnTopDriveId = topDriveAccountMap.get(vehicleOKUInstance.topDriveBusinessID);
+            Account accountBasedOnGCId = gcidAccountMap.get(vehicleOKUInstance.GCID);
+            String accountIdToBeUpdated;
+            String sBMwUnit;
+            
+            if(null != accountBasedOnTopDriveId){
+                accountIdToBeUpdated = String.valueOf(accountBasedOnTopDriveId.Id);
+                sBMwUnit = accountBasedOnTopDriveId.BMW_Unit__c;
+            } else if(null != accountBasedOnGCId){
+                
+                accountIdToBeUpdated = String.valueOf(accountBasedOnGCId.Id);
+                sBMwUnit = accountBasedOnGCId.BMW_Unit__c;
+            }
+            System.debug(DebugStart + ' accountIdToBeUpdated is :'+accountIdToBeUpdated);    
+
+           currVehicle = updateAssetFields(vehicleOKUInstance,currVehicle); //WHCRM-80225
+           if(currVehicle != null){
+            try{
+                if(vehicleOKUInstance.operation != null && vehicleOKUInstance.operation.equalsIgnoreCase('Delete')){
+                    deleteC2VRelation(accountIdToBeUpdated,vehicleOKUInstance,currVehicle, sBMWUnit);
+                }else{
+                    if (vehicleOKUInstance.GCID == null){
+						handleRelationTermination(vehicleOKUInstance, currVehicle); //WHCRM-72519
+                    }
+                    else{
+                    	if(vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sKeeper)){
+                        	handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent,sBMWUnit);
+	                    }
+    	                if(vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sOwner)){   //WHCRM-64879
+        	                 handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent,sBMWUnit);
+            	        }
+                	    if(vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sUser)){    //WHCRM-64879
+                    	     handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent,sBMWUnit);
+                    	}
+                   }
+                }
+            }
+            catch(Exception e){
+                 String errorMessage = 'Error while processing the outbound customer  for CoRelation id:  ' + vehicleOKUInstance.integrationCorrelationId + '';
+                 //sendErrorsAsPlatformEvent(errorMessage,Constants.errorType_Technical,e);
+                 
+                rw.Status = '500';
+                rw.Message = e.getMessage()+'---'+e.getStackTraceString();
+            }
+        }
+        }
+        }
+        /* WHCRM-56395 - Changes done to Automatic import of VIN - Start */
+        if(VehicleVins != null)
+        {  //WHCRM-64879
+             //RequestHelper.createAssetforDER(VehicleVins);
+        }
+        /* WHCRM-56395 - Changes done to Automatic import of VIN - End */
+        
+        if(null != MapofVinToEventObj && MapofVinToEventObj.size()>0){
+            system.debug('inside+'+MapofVinToEventObj);
+            /*Start WHCRM-41362 : Changed method signature and moved method to RelationshipTermination_BE class*/
+            /*Start WHCRM-42064 : Changed class name from RelationshipTermination_BE to BEHandleOKURelationship*/
+            //TerminateOKURelationshipBasedOnVIN(MapofVinToEventObj);
+            BEHandleOKURelationship.TerminateOKURelationshipBasedOnVIN(MapofVinToEventObj,vinVehicleMap,createHistoryRecords);
+            /*End WHCRM-41362 : Changed method signature and moved method to RelationshipTermination_BE class*/
+            /*End WHCRM-42064 : Changed class name from RelationshipTermination_BE to BEHandleOKURelationship*/
+        }
+            
+        
+        if(null != errorMessages && errorMessages.size() > 0){
+            System.debug(DebugStart + ' After processing all hrett');
+            //sendErrorsListAsPlatformEvent(errorMessages,Constants.errorType_Business, null);
+        }
+        System.debug(DebugStart + ' After processing all events in the main method');    
+    if(isexecute)
+        
+        
+        persistChanges();
+        System.debug(DebugStart + ' Method Exit');   
+
+        for(String str : retuenMapForAsset.keySet()){
+            returnResponseList.add(retuenMapForAsset.get(str));
+        }
+
+        return returnResponseList;
+
+    }
+    /**
+     * WHCRM-80225: Method used to Map Asset fields update
+     * WHCRM-68412: Vehicle_sub_type__c Added
+    **/
+    public static Asset updateAssetFields(VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle){
+        if(currVehicle != null){
+            if(vehicleOKUInstance.licenseNumber != null){
+                currVehicle.License_Number__c = vehicleOKUInstance.licenseNumber;
+            }
+            if(vehicleOKUInstance.firstRegistrationDate != null){
+                currVehicle.First_Registration_Date__c = vehicleOKUInstance.firstRegistrationDate;
+            }
+            if(vehicleOKUInstance.reRegistrationDate != null){
+                currVehicle.Re_Registration_Date__c = vehicleOKUInstance.reRegistrationDate;
+            }
+            if(vehicleOKUInstance.vehicleStatus != null){
+                currVehicle.Vehicle_Status__c = vehicleOKUInstance.vehicleStatus;
+            }
+            if(vehicleOKUInstance.subVehicleType != null){
+                currVehicle.Vehicle_sub_type__c = vehicleOKUInstance.subVehicleType;
+            }
+        }
+        return currVehicle;
+    }
+
+    // Method to persist all the changes required in Salesforce    
+    private static void persistChanges(){
+        String DebugStart = '## ReceiveVehicleOKURelationPEHandler.persistChanges';    
+
+        try 
+        {
+            system.debug(DebugStart + ' UpdatedVehicles:'+updatedVehicles);
+            system.debug(DebugStart + ' createHistoryRecords:'+createHistoryRecords);
+            system.debug(DebugStart + ' deleteAssetUserRelation:'+deleteAssetUserRelation);
+            system.debug(DebugStart + ' updatedAssetUserRelation:'+updatedAssetUserRelation);
+            system.debug(DebugStart + ' newAssetUserRelation:'+newAssetUserRelation);
+            system.debug(DebugStart + ' mapUpdatedVehicles:'+mapAssetUpdate);
+            List<Asset> lstUpdateVeh = new List<Asset>();
+            if(null != mapAssetUpdate)
+            {
+                lstUpdateVeh.addall(mapAssetUpdate.values());
+                system.debug('Final Update Vehicle:'+lstUpdateVeh);
+                if(null != lstUpdateVeh && lstUpdateVeh.size() > 0){
+                    System.debug(DebugStart + ' Debug 8022');
+                    List<database.SaveResult> dbsVehicles = database.update(lstUpdateVeh, false);
+                    
+                    if(reportErrors){
+                        //checkAndReportErrors(dbsVehicles,null);   // WHCRM-54030
+                    }
+
+                    // WHCRM-54030
+                    for(Integer i=0;i<dbsVehicles.size();i++){
+                        if (dbsVehicles.get(i).isSuccess()){
+                            
+                            if (assetIdVsVIN.containsKey(dbsVehicles.get(i).getId())) {
+                                retuenMapForAsset.get(assetIdVsVIN.get(dbsVehicles.get(i).getId())).status = '200';
+                                retuenMapForAsset.get(assetIdVsVIN.get(dbsVehicles.get(i).getId())).message = 'Success';
+                            }
+                        }else if (!dbsVehicles.get(i).isSuccess()){
+                            // DML operation failed
+                            Database.Error error = dbsVehicles.get(i).getErrors().get(0);
+                            String failedDML = error.getMessage();
+                            system.debug('Failed ID'+lstUpdateVeh.get(i).Id);
+                            String failedAssetId = lstUpdateVeh.get(i).Id;
+                            if (assetIdVsVIN.containsKey(failedAssetId)) {
+                                retuenMapForAsset.get(assetIdVsVIN.get(failedAssetId)).status = '400';
+                                retuenMapForAsset.get(assetIdVsVIN.get(failedAssetId)).message = failedDML;
+                }
+                    }
+                    } // WHCRM-54030 changes end here
+
+                }
+            }
+
+
+
+            if(null != newAssetUserRelation && newAssetUserRelation.size() > 0){
+                List<database.SaveResult> dbsAURInserted = database.insert(newAssetUserRelation, false);  
+                checkAndReportErrors(dbsAURInserted,null);
+            }
+            
+            if(null != createHistoryRecords && createHistoryRecords.size() > 0){
+                List<database.SaveResult> dbsHistInserted = database.insert(createHistoryRecords, false);  
+                checkAndReportErrors(dbsHistInserted,null);
+            }
+
+            if(null != updatedAssetUserRelation && updatedAssetUserRelation.size() > 0){
+                List<database.SaveResult> dbsAURUpated = database.update(updatedAssetUserRelation, false);
+                checkAndReportErrors(dbsAURUpated,null);
+            }
+            
+            if(null != deleteAssetUserRelation && deleteAssetUserRelation.size() > 0){
+                System.debug(DebugStart + ' Debug 8022');
+                List<database.DeleteResult> dbsAURDeleted = database.delete(deleteAssetUserRelation, false);
+                if(reportErrors){
+                    checkAndReportErrors(null,dbsAURDeleted);
+                }
+            }
+            if(null != historyRecordsToBeDeleted && historyRecordsToBeDeleted.size() > 0){
+                System.debug(DebugStart + ' Debug 8022');
+                List<database.DeleteResult> dbsAURDeleted = database.delete(historyRecordsToBeDeleted, false);
+            }
+
+        }
+        catch (Exception e)
+        {
+            system.debug(DebugStart + ' Exception occured:'+e);
+            // add further exception handling here
+        }
+    }
+
+    /*Start WHCRM-41362 : Changed access modifier to public to be called from RelationshipTermination_BE class*/
+    /*Start WHCRM-42064 : Changed class name from RelationshipTermination_BE to BEHandleOKURelationship*/
+    //private void checkAndReportErrors(List<database.SaveResult> results, List<database.DeleteResult> deletedResults){
+    public static void checkAndReportErrors(List<database.SaveResult> results, List<database.DeleteResult> deletedResults){
+        /*End WHCRM-41362 : Changed access modifier to public to be called from RelationshipTermination_BE class*/
+        /*End WHCRM-42064 : Changed class name from RelationshipTermination_BE to BEHandleOKURelationship*/
+        if(null != results){
+            for (Database.SaveResult sr : results) {
+                if (!sr.isSuccess()) {
+                    for(Database.Error err : sr.getErrors()) {
+                        System.debug('err---in--'+JSON.serialize(err));
+                        String errorMessage = 'Error while processing the inbound OKU for :  ' + err.getMessage() + ' '+err.getFields()+'';
+                        //sendErrorsAsPlatformEvent(errorMessage,Constants.errorType_Technical,null);
+                        }
+                } else if (sr.isSuccess()) {
+                    System.debug('Successfully inserted ' + sr.getId());
+                    if (assetIdVsVIN.containsKey(sr.getId())) {
+                        retuenMapForAsset.get(assetIdVsVIN.get(sr.getId())).status = '200';
+                        retuenMapForAsset.get(assetIdVsVIN.get(sr.getId())).message = 'Success';
+                    }
+                }
+            }
+        }
+        else if(null != deletedResults){
+            for (Database.DeleteResult sr : deletedResults) {
+                if (!sr.isSuccess()) {
+                    for(Database.Error err : sr.getErrors()) {
+                        String errorMessage = 'Error while processing the inbound OKU for :  ' + err.getMessage() + ' '+err.getFields()+'';
+                        //sendErrorsAsPlatformEvent(errorMessage,Constants.errorType_Technical,null);
+                        }
+                } 
+            }
+        }
+    }
+    
+
+     // Method to populate all the required data which will be used in processing of the events
+     private static void prepareData(List<vehicleOKU> vehicleOKUWrapperList){
+        
+        String DebugStart = '## ReceiveVehicleOKURelationPEHandler.prepareData';
+        Set<String> vinSet = new Set<String>();
+        Set<String> topDriveIDSet = new Set<String>();
+        Set<String> gcIDSet = new Set<String>();
+        List<String> gcIDCheck = new List<String>(); 
+        // Populate values for all the sets
+        for(vehicleOKU event: vehicleOKUWrapperList){
+            if(null != event.VINLong){
+                vinSet.add(event.VINLong);
+            }
+            if(null != event.topDriveBusinessID){
+                topDriveIDSet.add(event.topDriveBusinessID);
+            }
+            if(null != event.GCID && event.gcidFinder==false){
+                gcIDSet.add(event.GCID);
+            }else if(null != event.GCID && event.gcidFinder==true){
+				gcIDCheck.add(event.GCID);
+        
+        }
+        }
+         if(!gcIDCheck.isEmpty())
+		{
+			Map<String,String> searchMasterGcid = GCIDFinder.getGCIDFromMasterAccountOrIProfile(gcIDCheck);
+			for(vehicleOKU event1: vehicleOKUWrapperList){
+				if(searchMasterGcid.Containskey(event1.GCID) && searchMasterGcid.get(event1.GCID)!= null ){
+					event1.gcid = searchMasterGcid.get(event1.GCID);
+					gcIDSet.add(searchMasterGcid.get(event1.GCID));
+			}
+			}	
+		
+		}
+    
+        system.debug(DebugStart + ' VINSet:'+VINSet);
+        system.debug(DebugStart + ' topDriveIDSet:'+topDriveIDSet);
+        system.debug(DebugStart + ' gcIDSet:'+gcIDSet);
+        
+        // Populate value for the additional User details
+        if(null != vinSet && vinSet.size() > 0){
+            additionalUserLst = [select Id, Account__c, Start_Date__c, End_Date__c, Asset__c,Source_System__c,Asset__r.VIN_Long__c,User_Change_Date__c  
+                                    from AssetUserRelation__c where Asset__r.VIN_Long__c in :vinSet ORDER BY Start_Date__c DESC];
+            
+            system.debug(DebugStart + ' AdditionalUserLst:'+additionalUserLst.size() + ' - '+ additionalUserLst);
+    
+            List<Asset> vehicleLst = new List<Asset>();       
+            vehicleLst = [select Id,BMW_Unit__c, OwnerId,VIN_Long__c, Keeper__c, Keeper_Start_Date__c, Keeper_End_Date__c, Keeper_Source_System__c,
+                            User__c,User_Start_Date__c, User_End_Date__c, User_Source_System__c,
+                            Owner__c, Owner_Start_Date__c, Owner_End_Date__c, Source_System__c,License_Number__c,Vehicle_Status__c,
+                            Keeper_Change_Date__c, Owner_Change_Date__c, User_Change_Date__c
+              from Asset where VIN_Long__c in :VINSet];
+            
+            system.debug(DebugStart + ' VehicleLst:'+vehicleLst.size() + ' - '+ vehicleLst);
+    
+            // Populate the vehicle Map
+            for (Asset v: vehicleLst){
+                vinVehicleMap.put(v.VIN_Long__c, v);
+                assetIdVsVIN.put(v.Id,v.VIN_Long__c);
+            }
+            
+            if((null != topDriveIDSet && topDriveIDSet.size() > 0) || (null != gcIDSet && gcIDSet.size() > 0)){
+                existingHistoryRecords = [Select Id,Account__c,Asset__c,End_Date__c,License_Plate__c,Name,OwnerId,Relation_Change_Date__c,Relation_Type__c,
+                                          Source_System__c,Start_Date__c,Status__c,VIN_Long__c from OKU_History__c where VIN_Long__c in :vinSet 
+                                          AND (Account__r.TopDrive_Business_ID__c in :topDriveIDSet OR Account__r.GCID__c in :gcIDSet)];
+                
+            }
+                                        
+        }
+        
+        if(null != topDriveIDSet && topDriveIDSet.size() > 0){
+            system.debug(DebugStart + ' topDriveIDSet:'+topDriveIDSet.size() + ' - '+ topDriveIDSet);
+            List<Account> accList = [Select Id, Name,TopDrive_Business_ID__c,GCID__c,BMW_Unit__c from Account where TopDrive_Business_ID__c in :topDriveIDSet];
+
+            for (Account a: accList){
+                topDriveAccountMap.put(a.TopDrive_Business_ID__c, a);
+            }
+        }
+        
+        if(null != gcIDSet && gcIDSet.size() > 0){
+            system.debug(DebugStart + ' gcIDSet:'+gcIDSet.size() + ' - '+ gcIDSet);
+            List<Account> accList = [Select Id, Name,TopDrive_Business_ID__c,GCID__c,BMW_Unit__c from Account where GCID__c in :gcIDSet];
+
+            for (Account a: accList){
+                gcidAccountMap.put(a.GCID__c, a);
+            }
+        }
+        
+        system.debug(DebugStart + ' VINVehicleMap is: - '+vinVehicleMap);
+        system.debug(DebugStart + ' topDriveAccountMap is: - ' + topDriveAccountMap);
+        system.debug(DebugStart + ' gcidAccountMap is: - '+ gcidAccountMap);
+        
+    }
+
+    //WHCRM-72519: Method for termination all c2v
+    private static void handleRelationTermination(VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle){
+        if(currVehicle.BMW_Unit__c.substringBefore('-') == 'CA'){
+            CAHandleOKURelationship.terminateOKURelationshipBasedOnVIN(currVehicle, updatedVehicles, vehicleOKUInstance, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation);
+        }
+    }
+
+    /**
+     * Method to process Owner related events and populate the lists for Salesforce changes
+     * WHCRM-76931: CA,MX condition Added
+     * WHCRM-72519: Enhanced CA condition
+    **/
+    private static void handleKeeperScenario(String accountIdToBeUpdated, VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle, boolean isDeleteEvent,string sBMWUnit){
+        
+        if(sBMWUnit.substringBefore('-') == 'DE'){
+            DEHandleOKURelationship.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'BE'){
+            BEHandleOKURelationship.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'IT'){
+            ITHandleOKURelationship.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'PT'){
+            PTHandleOKURelationship.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'UK'){
+            UKHandleOKURelationship.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'US' || sBMWUnit.substringBefore('-') == 'MX'){
+            AmericasHandleOKURelationship AMSHandleOKU = new AmericasHandleOKURelationship();
+            AMSHandleOKU.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate, deleteAssetUserRelation);
+            AMSHandleOKU.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);//Added by Pavan as part of WHCRM-66595
+        }else if(sBMWUnit.substringBefore('-') == 'CA'){
+            CAHandleOKURelationship CAHandleOKU = new CAHandleOKURelationship();
+            CAHandleOKU.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate, deleteAssetUserRelation);
+            CAHandleOKU.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        }
+    }
+
+    // Method to process Owner related events and populate the lists for Salesforce changes
+    // WHCRM-76931 - CA,MX condition Added
+    private static void handleOwnerScenario(String accountIdToBeUpdated, VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle, boolean isDeleteEvent,string sBMWUnit){
+         
+        if(sBMWUnit.substringBefore('-') == 'DE'){
+            DEHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'BE'){
+            BEHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'IT'){
+            ITHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'PT'){
+            PTHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'UK'){
+          UKHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        } else if(sBMWUnit.substringBefore('-') == 'US' || sBMWUnit.substringBefore('-') == 'MX' || sBMWUnit.substringBefore('-') == 'CA'){
+          AmericasHandleOKURelationship.handleOwnerScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate);
+        }       
+    }
+
+    /**
+     * Method to process User related events and populate the lists for Salesforce changes
+     * WHCRM-76931: CA,MX condition Added
+     * WHCRM-72519: Enhanced CA condition
+    **/
+    private static void handleUserScenario(String accountIdToBeUpdated, VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle, boolean isDeleteEvent,string sBMWUnit){
+       
+       if(sBMWUnit.substringBefore('-') == 'DE'){
+            DEHandleOKURelationship.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'BE'){
+            BEHandleOKURelationship.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'IT'){
+            ITHandleOKURelationship.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'PT'){
+            PTHandleOKURelationship.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'UK'){
+       	    UKHandleOKURelationship.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+        } else if(sBMWUnit.substringBefore('-') == 'US' || sBMWUnit.substringBefore('-') == 'MX'){
+            AmericasHandleOKURelationship AMSHandleOKU = new AmericasHandleOKURelationship();
+            AMSHandleOKU.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+            AMSHandleOKU.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate, deleteAssetUserRelation);//Added by Pavan as part of WHCRM-66595
+        } else if( sBMWUnit.substringBefore('-') == 'CA'){
+            CAHandleOKURelationship CAHandleOKU = new CAHandleOKURelationship();
+            CAHandleOKU.handleUserScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles,
+                                                       mapAssetUpdate, additionalUserLst, newAssetUserRelation, updatedAssetUserRelation, deleteAssetUserRelation);
+            CAHandleOKU.handleKeeperScenario(accountIdToBeUpdated, vehicleOKUInstance, currVehicle, isDeleteEvent, sBMWUnit, updatedVehicles, mapAssetUpdate, deleteAssetUserRelation);//Added by Pavan as part of WHCRM-66595
+        }
+    } 
+
+    // This method historizes the asset OKU relation whenever the relation for OKU is created / terminated
+    // start WHCRM-41362 : Gourav made the method public static to be called from market specific class
+    /*private void historizeAsset(String relationType,String accId,Date startDate, Date endDate,String sourceSystem, 
+                        Id assetId, String licensePlate, String status, String vinLong, String ownerId, Date changeDate,string sBMWUnit){*/
+    public static void historizeAsset(String relationType,String accId,Date startDate, Date endDate,String sourceSystem, 
+                                        Id assetId, String licensePlate, String status, String vinLong, String ownerId, Date changeDate,string sBMWUnit){
+        // end WHCRM-41362 : Gourav made the method public static to be called from market specific class
+            
+        OKU_History__c historyRecord = new OKU_History__c();
+
+        historyRecord.Relation_Type__c = relationType;
+        historyRecord.Account__c = accId;
+        historyRecord.Start_Date__c = startDate;
+        historyRecord.End_Date__c = endDate;
+        historyRecord.Source_System__c = sourceSystem;
+        historyRecord.Asset__c = assetId;
+        historyRecord.License_Plate__c = licensePlate;
+        historyRecord.Status__c = status;
+        historyRecord.VIN_Long__c = vinLong;
+        historyRecord.OwnerId = ownerId;
+        historyRecord.Relation_Change_Date__c = changeDate;
+        historyRecord.BMW_Unit__c = sBMWUnit;
+        if(sBMWUnit.contains(Constants.BE))
+            historyRecord.Termination_source__c = sourceSystem;
+        
+        createHistoryRecords.add(historyRecord);
+    }
+    
+
+    // This method does all the validations on the event passed. Based on the validation, the errors 
+    // will be prepared and finally propogated to the Error Platform event 
+    public static Boolean validateVehicleAndAccount(vehicleOKU vehicleOKUInstance, ResponseWrapper rw){
+        String DebugStart = '## ReceiveVehicleOKURelationPEHandler.validateVehicleAndAccount';    
+        Asset currentVehicle = null;
+        // Check if the vehicle exists or not in Salesforce
+        if(null != vehicleOKUInstance.VINLong){
+            currentVehicle = vinVehicleMap.get(vehicleOKUInstance.VINLong);
+            //WHCRM-64879
+            /* WHCRM-56395 - Changes done to Automatic import of VIN - Start */
+            /*if(currentVehicle ==null )
+            {
+                system.debug('Calling createAssetforDER : VINLong : '+ vehicleOKUInstance.VINLong);
+                set<String> VehicleVins = new set<String>();
+                VehicleVins.add(vehicleOKUInstance.VINLong);
+                RequestHelper.createAssetforDER(VehicleVins);
+            }*/
+           /* WHCRM-56395 - Changes done to Automatic import of VIN - End */
+            //WHCRM-64879
+        }
+        
+        system.debug('Event inbound :: '+ vehicleOKUInstance);
+        String topDriveBusinessId = vehicleOKUInstance.topDriveBusinessID;
+        String gcId = vehicleOKUInstance.GCID;
+        Account accountBasedonTopDriveBusinessId = null;
+        Account accountBasedonGCId = null;
+        
+        if(null != topDriveBusinessId){
+            accountBasedonTopDriveBusinessId = topDriveAccountMap.get(topDriveBusinessId);
+        }
+        if(null != gcId){
+            accountBasedonGCId = gcidAccountMap.get(gcId);    
+        }
+        
+        String errorMessage = null;
+
+        //WHCRM-72519: If condition Added 
+        if(vehicleOKUInstance.relationType == null && gcId == null && vehicleOKUInstance.VINLong != null && vehicleOKUInstance.endDate != null && currentVehicle != null && 
+           currentVehicle.BMW_Unit__c == Constants.bmwUnit_CANSC && currentVehicle.VIN_Long__c == vehicleOKUInstance.VINLong){
+            errorMessage = null;
+        }
+        else if(null == vehicleOKUInstance.relationType ){
+            errorMessage = 'No Relation Type passed';
+        }
+        else if( vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sKeeper) && vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sUser)
+        && vehicleOKUInstance.relationType.equalsIgnoreCase(Constants.sOwner)){
+            errorMessage = 'Incorrect Relation Type: '  + vehicleOKUInstance.relationType + 'passed';
+        }
+        else if(null == vehicleOKUInstance.VINLong){
+            errorMessage = 'No Vin Long value';
+        }
+        else if(null == currentVehicle){
+            //errorMessage = 'The given vehicle with VIN: ' + vehicleOKUInstance.VINLong + ' does not exist in Salesforce'; //WHCRM-64879
+        }
+        else if(null == topDriveBusinessId && null == gcId){
+            errorMessage = 'Cannot locate the Account in Salesforce as both TopDrive Business Id and GC Id are not passed';
+        }
+        else if(null != topDriveBusinessId && null != gcId){
+            if(null == accountBasedonTopDriveBusinessId){
+               errorMessage = 'The given Top Drive Business id: ' + topDriveBusinessId +' does not exist in Salesforce';
+            }
+            else if(null == accountBasedonGCId){
+                errorMessage = 'The given GCID: ' +gcId + 'does not exist in Salesforce';
+            }
+            else if(accountBasedonTopDriveBusinessId.Id != accountBasedonGCId.Id){
+                errorMessage = 'The passed GCID: ' + gcId + 'and Top Drive Business Id: ' +topDriveBusinessId +'  do not match to the same account in Salesforce';
+            }
+        }
+        else{
+            if(null != topDriveBusinessId && null == accountBasedonTopDriveBusinessId){
+                errorMessage = 'The given Top Drive Business id: ' + topDriveBusinessId +' does not exist in Salesforce';
+            }
+            else if(null != gcId && null == accountBasedonGCId){
+                errorMessage = 'The given GCID: ' +gcId + 'does not exist in Salesforce';
+            }
+        }
+        rw.message = errorMessage;
+
+        if(null != errorMessage){
+            //sendErrorsAsPlatformEvent(errorMessage, Constants.errorType_Business, null);
+            errorMessages.add(errorMessage);
+            return false;
+        }
+        return true;
+    }
+
+    //Delete C2V Relation based on the data received from platform event.
+    private static void deleteC2VRelation(Id accountIdToBeDeleted, VehicleOKURelationRestHandler.vehicleOKU vehicleOKUInstance, Asset currVehicle, string sBMWUnit){
+        reportErrors = false;
+        
+        if(sBMWUnit.substringBefore('-') == 'DE'){
+            DEHandleOKURelationship.deleteC2VRelation(accountIdToBeDeleted, vehicleOKUInstance, currVehicle, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation,
+                                                    existingHistoryRecords, historyRecordsToBeDeleted);
+        } else if(sBMWUnit.substringBefore('-') == 'BE'){
+            BEHandleOKURelationship.deleteC2VRelation(accountIdToBeDeleted, vehicleOKUInstance, currVehicle, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation,
+                                                    existingHistoryRecords, historyRecordsToBeDeleted);
+        } else if(sBMWUnit.substringBefore('-') == 'IT'){
+            ITHandleOKURelationship.deleteC2VRelation(accountIdToBeDeleted, vehicleOKUInstance, currVehicle, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation,
+                                                    existingHistoryRecords, historyRecordsToBeDeleted);
+        } else if(sBMWUnit.substringBefore('-') == 'PT'){
+            PTHandleOKURelationship.deleteC2VRelation(accountIdToBeDeleted, vehicleOKUInstance, currVehicle, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation,
+                                                    existingHistoryRecords, historyRecordsToBeDeleted);
+        } else if(sBMWUnit.substringBefore('-') == 'UK'){
+            UKHandleOKURelationship.deleteC2VRelation(accountIdToBeDeleted, vehicleOKUInstance, currVehicle, mapAssetUpdate, additionalUserLst, deleteAssetUserRelation,
+                                                    existingHistoryRecords, historyRecordsToBeDeleted);
+    }
+    }
+
+
+    global class vehicleOKU{
+        global String agentAlias;
+        global String businessSystemSource;
+        global String caRMenID;
+        global Date endDate;
+        global String GCID;
+        global boolean gcidFinder;
+        global String integrationCorrelationId;
+        global DateTime lastModifiedDate;
+        global String licenseNumber;
+        global String operation;
+        global Date reRegistrationDate;
+        global Date relationChangeDate;
+        global String relationLastModifiedSystem;
+        global String relationType;
+        global String sourceSystem;
+        global Date startDate;
+        global String technicalSystemSource;
+        global String topDriveBusinessID;
+        global String VINLong;
+        global Date firstRegistrationDate; //WHCRM-51094
+        global String vehicleStatus; //WHCRM-51094
+        global String subVehicleType;//WHCRM-68412
+    }
+
+    global class ResponseWrapper {
+        global String status;
+        global String message;
+        global String VIN;
+        global String GCID;
+    }
+
+}
