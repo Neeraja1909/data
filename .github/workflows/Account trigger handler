@@ -1,0 +1,1744 @@
+/*************************************************************************************************************************
+* Name: AccountTriggerHandler
+**************************************************************************************************************************
+Version*********Developer Name********* Date************Description
+1.1             Veena Jakore            23/04/2019      WHCRM-494 Implementation: Export Customer update or creation (to TopDrive via IL)
+2.0             Cognizant               08/04/21        WHCRM-37903  Implementation: method (updateShareableAccounts), added the Stop Flags: Stop_Communication_BMW_AG__c,Stop_Communication_Retail__c,Stop_Market_Research__c
+2.1        Anuj Singh        16/6/2022    WHCRM-44696 : Excluded lastname as field is required to insert/update the SharableAccount
+**************************************************************************************************************************/
+
+public class AccountTriggerHandler {
+    public static User currentUser = [Select id,BMW_Unit__c From User Where Id = :UserInfo.getUserId()];
+    public static List<User> gdprUser = [Select Id, Name from User where Name like 'GDPR Job' ORDER BY Name DESC LIMIT 1];
+    public static Map<Id,String> accountIdDealerInfoMapProcessing = new Map<Id,String>();
+    // Changed by - Cognizant(MB)-11/05/21- WHCRM-46357
+    public static final Id corporateRecordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('Corporate').getRecordTypeId();
+    public void beforeCreate(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap){
+        for (Account a : newList ){
+            if(currentUser.BMW_Unit__c != a.BMW_Unit__c){
+                a.BMW_Unit__c = currentUser.BMW_Unit__c;
+            }
+             //Note(Vinod) - When agent is manually creating account
+             a.Technical_System_Source__c = deriveLastModfiedSystem.SYSTEMNAME;
+             a.Business_System_Source__c  = deriveLastModfiedSystem.SYSTEMNAME;
+             a.Last_Modified_Date__c      = system.now();
+             a.Original_creation_date__c  = System.today();
+             if((system.UserInfo.getName()  == 'Scheduled Job SFDC' || !FeatureManagement.checkPermission(Constants.sMigration_Cust_Per)) && system.UserInfo.getName() != Constants.sGDPR_Job_Name && !FeatureManagement.checkPermission(Constants.sData_Governance_Agent))
+             a.Last_Modified_Date_Source__c=System.today();
+
+             if( (a.IsDuplicate__c !=  True) &&  (a.SlaveRecordCheck__c != True)
+              && (a.Customer_Status__c != 'Inactive')){
+                a.Created_by_Source__c       = deriveLastModfiedSystem.SYSTEMNAME;
+             }
+        }
+        
+        handleAddressChange(oldMap,newList);
+        //handleEmailAddresses(true,newList,oldMap);
+        setMysteryFlagForDynatrace(newList);//Added by Pavan as part of WHCRM-65569
+        
+    }
+    //WHCRM-18094
+    public void beforePreferredAddress(List<Account> accList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap){
+        for(Account a : accList){
+            if(string.IsBlank(a.PersonMailingPostalCode) && string.IsBlank(a.PersonOtherPostalCode)){
+                a.Preferred_Address__c = '';
+            }
+            if(string.IsNotBlank(a.PersonMailingPostalCode) && string.IsBlank(a.PersonOtherPostalCode)){
+                a.Preferred_Address__c = 'Private';
+            }
+            if(string.IsBlank(a.PersonMailingPostalCode) && string.IsNotBlank(a.PersonOtherPostalCode)){
+                a.Preferred_Address__c = 'Work';
+            }
+            if(string.IsNotBlank(a.PersonMailingPostalCode) && string.IsNotBlank(a.PersonOtherPostalCode)){
+                a.Preferred_Address__c = 'Private';
+            }
+        }
+    }
+    
+    //Start: WCHRM-73629 Prevents the Created by Source field to be updated when is already populated from IAP updates
+    public void handleCreatedBySource(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap) {
+        for(Account acc : newList) {
+            Account oldAcc = oldMap.get(acc.Id);
+            if(oldAcc.Created_by_Source__c != null) {
+                acc.Created_by_Source__c = oldAcc.Created_by_Source__c; 
+            }
+        }
+    } 
+    //End: WCHRM-73629 Prevents the Created by Source field to be updated when is already populated from IAP updates
+    
+    /* //Start: WHCRM-73629 Commented to improve code coverage percentage as it is not being used
+    public void populateCreatedBy(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap){
+        for(Account acc : newList)
+        {
+            if(acc.Created_by_Source__c == null && acc.Last_Modified_System__c != null)
+            {
+                acc.Created_by_Source__c = acc.Last_Modified_System__c;
+            }
+            if(acc.Original_creation_date__c == null && acc.Last_Modified_Date__c != null)
+            {
+                acc.Original_creation_date__c = acc.Last_Modified_Date__c.Date();
+            }
+            if(acc.Original_creation_date__c == null && acc.Last_Modified_Date__c == null)
+            { 
+                acc.Original_creation_date__c = System.today();
+            }
+        }
+    }*/ //End: WHCRM-73629 Commented to improve code coverage percentage as it is not being used
+    
+    //Added for WHCRM-55980
+  public void setRequestedDeletion(List<Account> accList, Map<Id,Account> oldMap,Boolean isInsert){
+        Date dtToday = Date.today();
+    for(Account a : accList){
+            if(a.BMW_Unit__c == Constants.bmwUnit_DENSC){
+                if(isInsert && a.PersonBirthdate != null){
+                    Integer iYears = a.PersonBirthdate.monthsBetween(dtToday) / 12;   
+                    if(iYears < 16){
+                        System.debug('iYears:inside'+iYears);
+                        a.Requested_Deletion__c = Constants.Full_deletion;
+                        a.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+                    }
+                }else if(!isInsert && oldMap.get(a.Id).PersonBirthdate != a.PersonBirthdate && a.PersonBirthdate != null){
+                    //WHCRM-53609 : Added a.PersonBirthdate != null
+                    Integer iYears = a.PersonBirthdate.monthsBetween(dtToday) / 12;   
+                    if(iYears < 16){
+                        a.Requested_Deletion__c = Constants.Full_deletion;
+                        a.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+                    }
+                }              
+            }      
+    }
+  }
+  //Ends WHCRM-55980
+    
+    public void afterCreate(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap)
+    { 
+        
+        PublishCustomerPlatformEventHandler accPEhandler = new PublishCustomerPlatformEventHandler();
+        
+        List<Account> lstAccountsToBeAddedToPE = new List<Account>();
+        List<Account> lstSlaveAccountsCreated  = new List<Account>();
+        
+        for (Account a : newList ){
+            if(a.SlaveRecordCheck__c && a.Master_Record__c != null){
+                lstSlaveAccountsCreated.add(a);
+            }
+            // Shouldn't invoke the Customer PE for Slave records insertion after Manual Merge.
+            if(a.SlaveRecordCheck__c != True){
+                if(a.BMW_Unit__c == 'US-NSC' && (!FeatureManagement.checkPermission(Constants.sIntegration_Cust_Per) || !FeatureManagement.checkPermission(Constants.sMigration_Cust_Per) || System.UserInfo.getName() != Constants.sPlatform_Integration_User_Name || system.UserInfo.getName()  != 'Scheduled Job SFDC')){
+                lstAccountsToBeAddedToPE.add(a);
+            }                       
+                else{
+                    lstAccountsToBeAddedToPE.add(a);
+                }
+            }
+        }
+        
+        if(!lstSlaveAccountsCreated.isEmpty()){
+            HandleCustomerMerge customerMerge = new HandleCustomerMerge();
+            customerMerge.manageCMergeOnSlaveInsert(lstSlaveAccountsCreated);
+        }
+        if(null != lstAccountsToBeAddedToPE && lstAccountsToBeAddedToPE.size() > 0){
+            //call method to publish events on insert
+            try{
+                accPEhandler.createPlatformEvenetOnAccountInsert(lstAccountsToBeAddedToPE);
+            }
+            catch(Exception e){
+                sendErrorsAsPlatformEvent(lstAccountsToBeAddedToPE,'insert',e);
+            }
+        }
+        
+    }
+    
+    public void beforeUpdate(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap)
+    { 
+        NKAMReadOnlyFields(newList,oldMap);
+        if(UserInfo.getName() == 'GDPR Job'){
+            setAddressStartDate(newList,oldMap,'GDPR Job');
+        }else{
+            setAddressStartDate(newList,oldMap,'Salesforce');
+        }
+        
+        //Note(Vinod) : Derive Last modified system based on agent field updation
+        if(system.UserInfo.getName() != Constants.sAutomated_User_Name)
+        {
+        deriveLastModfiedSystem.dervieLastModifiedSystemForAccount(oldMap);        
+        }
+        handleAddressChange(oldMap,newList);
+        //GDPR Start
+        //WHCRM-59226 cleaned up old code 
+        Map<Id,Account> accWithOKUHistories = new Map<Id, Account>([SELECT Id, Name, (Select End_Date__c from OKU_Histories__r order by End_Date__c DESC LIMIT 1) from Account where Id in :newMap.keyset()]);
+
+        Map<id,SObject> mapOfRecordsToBeUpdated = new Map<id,SObject>();
+        for(Account varAccount : newList){
+            if((system.UserInfo.getName()  == 'Scheduled Job SFDC' || !FeatureManagement.checkPermission(Constants.sMigration_Cust_Per)) && system.UserInfo.getName() != Constants.sGDPR_Job_Name && !FeatureManagement.checkPermission(Constants.sData_Governance_Agent))
+                varAccount.Last_Modified_Date_Source__c=System.today();
+            
+            
+            if(varAccount.Consent_Status__c != null && varAccount.Consent_Status__c != oldMap.get(varAccount.Id).Consent_Status__c){
+                varAccount.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD;
+                if(oldMap.get(varAccount.Id).Consent_Status__c == 'All_opt_out' && (varAccount.Consent_Status__c == 'Analytics_opt_in' || varAccount.Consent_Status__c == 'Only_Marketing_opt_in')){
+                    varAccount.Consent_HistoricOptIn__c = true;
+                    
+                }
+                        
+                }
+            if(varAccount.ConsentSituationDate__c != null && varAccount.ConsentSituationDate__c != oldMap.get(varAccount.Id).ConsentSituationDate__c){
+                varAccount.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+            }
+            if(varAccount.Customer_Status__c != null && varAccount.Customer_Status__c != oldMap.get(varAccount.Id).Customer_Status__c){
+                varAccount.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+            }
+            if(varAccount.Customer_Lifecycle_Stage__c != null && varAccount.Customer_Lifecycle_Stage__c != oldMap.get(varAccount.Id).Customer_Lifecycle_Stage__c){
+                varAccount.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+                varAccount.Retention_Date__c=null;
+                varAccount.Retention_Date_attr_sens_low__c=null;
+                //Added request retention calculation as part of WHCRM-36577
+                
+                if(varAccount.Customer_Lifecycle_Stage__c == 'Former Customer' && oldMap.get(varAccount.Id).Customer_Lifecycle_Stage__c != 'Former Customer'){
+                    varAccount.MaxRetentionOKU__c = accWithOKUHistories.get(varAccount.Id) != null ? (!accWithOKUHistories.get(varAccount.Id).OKU_Histories__r.isEmpty() ? accWithOKUHistories.get(varAccount.Id).OKU_Histories__r.get(0).End_Date__c : null) : null;
+                }
+        if(varAccount.Customer_Lifecycle_Stage__c == 'Active Customer' && oldMap.get(varAccount.Id).Customer_Lifecycle_Stage__c != 'Active Customer'){
+                    varAccount.MaxRetentionOKU__c = null;
+            }
+            }
+            if((varAccount.Requested_Deletion__c != null && varAccount.Requested_Deletion__c != oldMap.get(varAccount.Id).Requested_Deletion__c)||(varAccount.Customer_Status__c != oldMap.get(varAccount.Id).Customer_Status__c && varAccount.Customer_Status__c!=null &&varAccount.Customer_Status__c=='Deceased')){
+                varAccount.Retention_Calculation_Status__c = Constants.RETENTIONCALC_CHD; // GDPR Job
+                //varAccount.Retention_Date__c=null; GDPR Job
+                //varAccount.Retention_Date_attr_sens_low__c=null; GDPR Job
+                    System.debug('Requested Deletion Phase Change 1');
+                
+                
+                if(oldMap.get(varAccount.Id).Requested_Deletion__c == 'Core data remains' && varAccount.Requested_Deletion__c == 'Full deletion' && varAccount.Requested_Deletion__c != oldMap.get(varAccount.Id).Requested_Deletion__c){
+                    System.debug('Requested Deletion Phase Change 2');
+                    //varAccount.OwnerId = gdprUser?.get(0)?.Id;
+                    varAccount.OwnerId = UserInfo.getUserId();
+                }
+            }
+            if(varAccount.Stop_Deletion__c != oldMap.get(varAccount.Id).Stop_Deletion__c){
+                if(varAccount.Stop_Deletion__c){
+                /* WHCRM-45906  - Start */
+                    if (varAccount.Stop_Deletion_Set_By_User__c == null ) {
+                        varAccount.Stop_Deletion_Set_By_User__c = UserInfo.getUserId();}
+                    if (varAccount.Stop_Deletion_Set_Date__c == null){
+                    varAccount.Stop_Deletion_Set_Date__c = System.now();
+                    }
+                }
+                else if(!varAccount.Stop_Deletion__c){  /* WHCRM-45906  - end */
+                    varAccount.Stop_Deletion_Set_By_User__c = null;
+                    varAccount.Stop_Deletion_Set_Date__c = null;
+                    varAccount.Stop_Deletion_Reason__c = null;
+                }
+            }
+            if( varAccount.Customer_Status__c!=null && varAccount.Customer_Status__c =='Deceased'){
+                varAccount.Stop_Communication_BMW_AG__c=true;
+                varAccount.Stop_Communication_Retail__c=true;
+                varAccount.Stop_Market_Research__c=true;
+                varAccount.Requested_Deletion__c = 'Core data remains';
+            }
+        }
+        System.debug('Checking for Failure : '+mapOfRecordsToBeUpdated);
+      /*if(mapOfRecordsToBeUpdated.size()>0)
+        Database.SaveResult[] updateData = Database.update(mapOfRecordsToBeUpdated.values());
+       //WHCRM-59226 end here
+       //GDPR End*/
+        //handleEmailAddresses(false,newList,oldMap);
+        
+        
+    }
+    
+    public void afterUpdate(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap)
+    {  
+        
+        system.debug('## account afterUpdate'+newList);
+        PublishCustomerPlatformEventHandler accPEhandler = new PublishCustomerPlatformEventHandler();
+        List<Account> lstAccountsToBeAddedToPE = new List<Account>();
+        List<Log__c> olstlog = new List<Log__c>(); //WHCRM-57529: Added for Logging
+        for (Account newAct : newList ){
+            //Identify the original record
+            Account oldAct = oldmap.get(newAct.Id);
+            
+            //Initialize the helper object and inject the old and new account record
+            HelperUtility helper = new HelperUtility(oldAct, newAct);
+            
+            //Create a list of fields that we want to check.
+            List<String> fieldList = Constants.Customer_fieldListRelevantForUpdate;
+            
+            //Run the helper method
+            Boolean pass = helper.hasAnyFieldChanged(fieldList);
+            
+            if(newAct.IsPersonAccount && !pass)
+            {
+                //Create a list of fields that we want to check.
+                fieldList = Constants.PersonAccount_fieldListRelevantForUpdate;
+                
+                //Run the helper method
+                pass = helper.hasAnyFieldChanged(fieldList);
+            }
+            
+            //WHCRM-57529: Added for Logging
+            String enableLogging = System.Label.isAccountPEEligible;
+            System.debug('enableLogging: '+enableLogging);
+            if(pass && enableLogging == 'Y'){
+                Log__c olog = new Log__c();
+                olog.Comments__c = 'isAccountPEEligible-Yes';
+                olog.NetworkName__c = (String)newAct.Id;
+                olstlog.add(olog);
+            }else if(!pass && enableLogging == 'Y'){
+                Log__c olog = new Log__c();
+                olog.Comments__c = 'isAccountPEEligible-No';
+                olog.NetworkName__c = (String)newAct.Id;
+                olstlog.add(olog);
+            }
+               
+            
+            if(pass){
+                lstAccountsToBeAddedToPE.add(newAct);
+                system.debug('newAct '+newAct);
+            }
+            
+        }
+        //WHCRM-57529: Added for Logging
+        if(!olstlog.isEmpty()){
+            Database.insert(olstlog);
+        }
+        if(null != lstAccountsToBeAddedToPE && lstAccountsToBeAddedToPE.size() > 0){
+            //call method to publish events on update
+            try{
+                //Populate Active ADR
+                populateActiveADR(newList);
+                accPEhandler.createPlatformEvenetOnAccountUpdate(lstAccountsToBeAddedToPE,accountIdDealerInfoMapProcessing);
+            }
+            catch(Exception e){
+                sendErrorsAsPlatformEvent(lstAccountsToBeAddedToPE,'update',e);      
+            }
+        }
+
+    }
+    
+    public void populateActiveADR(List<Account> newList){
+        
+        //Assigning list of event object to be published on update
+        //Query on ADR to get related Data      
+        Set<Id> accountSet = new Set<Id>();
+        System.debug('newListnewList::'+newList);
+        for(Account acc : newList){
+            accountSet.add(acc.Id);
+        }
+        System.debug('accountSetaccountSet::'+accountSet);
+        for(Account_Dealer_Relation__c adr : [Select id,End_Date__c,Related_Account__c,Dealer_Outlet__r.Buno__c,SA_Retail_Dealer_Number__c 
+                                            FROM Account_Dealer_Relation__c
+                                            WHERE Related_Account__c IN: accountSet]){
+                                                  String BunoSA2 = null;
+                                                  System.debug('adradradr Dealer_Outlet__r:'+adr.Dealer_Outlet__r.Buno__c);
+                                                  System.debug('adr SA_Retail_Dealer_Number__c:'+adr.SA_Retail_Dealer_Number__c);
+            if(adr.End_Date__c == null || adr.End_Date__c > date.today()){
+                                                  if(accountIdDealerInfoMapProcessing.containsKey(adr.Related_Account__c)){
+                                                      BunoSA2 = accountIdDealerInfoMapProcessing.get(adr.Related_Account__c);
+                                                      BunoSA2 = BunoSA2 + ';' +adr.Dealer_Outlet__r.Buno__c + '-' +adr.SA_Retail_Dealer_Number__c;
+                                                      accountIdDealerInfoMapProcessing.put(adr.Related_Account__c,BunoSA2);
+                                                  }
+                                                  else{
+                                                      BunoSA2 = adr.Dealer_Outlet__r.Buno__c + '-' +adr.SA_Retail_Dealer_Number__c;
+                                                      accountIdDealerInfoMapProcessing.put(adr.Related_Account__c,BunoSA2);
+                                                  }
+                                              }
+        }
+        System.debug('accountIdDealerInfoMapProcessing::'+accountIdDealerInfoMapProcessing);
+        //system.assert(false);     
+    }
+        
+    public void beforeDelete(List<Account> oldList, Map<Id,Account> oldMap)
+    { 
+        system.debug('## account beforeDelete'+oldList);
+        HandleCustomerMerge.getOpportunitiesDataBeforeMergingProcess(oldList);
+      HandleCustomerMerge.handleAURDataBeforeMergingProcess(oldList);        
+    
+        populateActiveADR(oldList);
+        HandleCustomerMerge oHandleCustomerMerge = new HandleCustomerMerge();
+        oHandleCustomerMerge.handleSlaveChild(oldList, oldMap);
+        oHandleCustomerMerge.manageCustomerMergeOnDelete(oldList, oldMap);
+    }
+    
+    public void afterDelete(List<Account> oldList, Map<Id,Account> oldMap)
+    { 
+        
+        if(FeatureManagement.checkPermission(Constants.sBMW_Manual_Customer_Merge)){
+            for(Account a : oldList) {
+                if(a.MasterRecordId == null) {
+                    a.addError(Label.BMW_Manual_Customer_Merge_Error);
+        
+        }
+            }
+            }
+        HandleCustomerMerge oHandleCustomerMerge = new HandleCustomerMerge();
+        oHandleCustomerMerge.handleDelteAfterMerg(oldList, oldMap,accountIdDealerInfoMapProcessing);
+    oHandleCustomerMerge.handleOpportunitiesAndRequests(oldList);
+            }
+            
+    // Common method to prepare and send Errors. Entire exception is also passed to enable future use
+    public void sendErrorsAsPlatformEvent(List<Account> lstAccounts,String operation, Exception excep){
+        system.debug('## account prepareErrorPlatformEvent'+lstAccounts);
+        
+        List<PEpublishError__e> errorEventList = new List<PEpublishError__e>();
+        PublishErrorPlatformEventHandler errorHandler = new PublishErrorPlatformEventHandler();
+        PEpublishError__e errorEvent = new PEpublishError__e();
+        List<Id> accIdsList = new List<Id>();
+        boolean accountToBeUpdated = false;
+        
+        for(Account a: lstAccounts){
+            accIdsList.add(a.Id);
+        }
+        
+        errorEvent.Error_Details__c = 'Error while' + operation + 'of the outbound customer platform events for IDs:  ' + accIdsList + '';
+        errorEvent.Component_Code__c = Constants.componentCode_CUSTOMER;
+        errorEvent.System_Code__c = Constants.systemCode_Salesforce;
+        errorEvent.Error_Date__c = System.now();
+        errorEvent.Error_Type__c = Constants.errorType_Technical;
+        errorEvent.Error_Trace__c = excep.getStackTraceString();
+        
+        errorEventList.add(errorEvent);
+        errorHandler.sendErrorList(errorEventList);               
+    }
+    
+    // Calculate the street name and the house number from the address and return it in the map
+    public Map<String,String> getStreetAndHouseNumberFromAddress(String address){
+        system.debug('## handleAddressChange: As expected with streetAddress as ' + address);
+        Map<String,String> mapStreetHouseNumber = new Map<String,String>();
+        HelperUtility helper = new HelperUtility();
+        
+        String[] splitWords = address.split(' ',0);
+        system.debug('## handleAddressChange: splitWords is ' + splitWords);
+        if(null != splitWords && splitWords.size() > 0){
+            String streetName = null;
+            for(String splitWord: splitWords){                   
+                system.debug('## handleAddressChange: splitWord in the loop is ' + splitWord);
+                if(helper.doesFieldContainsNumber(splitWord) && !splitWord.endsWith('.')){
+                    system.debug('## handleAddressChange: Got the house number in the loop');
+                    // WHCRM-79472
+                    if(mapStreetHouseNumber.get('HouseNumber')==null)
+                    {
+                    mapStreetHouseNumber.put('HouseNumber',splitWord);
+                }
+                    // WHCRM-79472 Ends Here
+                }
+                else{
+                    system.debug('## handleAddressChange: Got the street name in the loop');
+                    if(null == streetName){
+                        streetName = splitWord;
+                    }
+                    else{
+                        streetName = streetName + ' ' + splitWord;
+                    }
+                }
+            }
+            if(null != streetName){
+                mapStreetHouseNumber.put('StreetName',streetName);
+            }
+        }
+        return mapStreetHouseNumber;
+    }
+    
+    // This method sets the respective street name and the house number for the changed address field
+    public void handleAddressChange(Map<Id,Account> oldMap, List<Account> newList){
+        system.debug('## Inside method handleAddressChange oldAccount');
+        Account oldAct = null;
+        List<Account> accList = null;
+        Set<id> accIds = new Set<id>();
+        Map<String,Lead> leadAccountId = new Map<String,Lead>();
+        Map<String,String> mapStreetHouseNumber = null;
+        boolean accountToBeUpdated = false;
+        
+        //Account Updation Based On Country : WHCRM-53795
+        Map <String,StopLeadConversionAccountUpdate__c> accountUpdateCheck = new Map<String,StopLeadConversionAccountUpdate__c>();
+        for(StopLeadConversionAccountUpdate__c accUpdChk : StopLeadConversionAccountUpdate__c.getAll().values()){
+            accountUpdateCheck.put(accUpdChk.StopLeadConversionAccountUpdateCountry__c,accUpdChk);
+        }
+        
+        for(Account newAccnt : newList){
+            if(accountUpdateCheck.containsKey(newAccnt.BMW_Unit__c) && newAccnt.Phone != null)
+                accIds.add(newAccnt.id);
+        }
+        if(accIds !=null && !accIds.isEmpty()){
+            for(Lead leadAccId : [SELECT id,ConvertedAccountId,GCID__c FROM Lead WHERE ConvertedAccountId =: accIds]){
+                leadAccountId.put(leadAccId.ConvertedAccountId+''+leadAccId.GCID__c,leadAccId);
+            }
+            System.debug('leadAccountIdObjectMap::'+leadAccountId);
+        }
+        // WHCRM-53795 adding US Market Lead logic for Account
+        
+        for(Account newAct: newList){
+            if(null != oldMap){
+                oldAct = oldMap.get(newAct.Id);               
+            }
+            if(newAct.BMW_Unit__c != null && newAct.BMW_Unit__c.substringBefore('-') != 'UK')
+            {
+            if(null != newAct.BillingStreet && (null == oldAct || oldAct.BillingStreet != newAct.BillingStreet)){
+                //if(oldAct.BillingStreet != newAct.BillingStreet && null != newAct.BillingStreet){
+                system.debug('## handleAddressChange: As expected 1');
+                    // WHCRM-60574
+                    Map<String,object> streetCheck = new Map<String,object>();
+                    Boolean flag = false;
+                    String streetName;
+                    String houseNumber;
+                    String[] splitWords = newAct.BillingStreet.split(' ',0);
+                    System.debug('substringvalues'+splitWords.size());
+                    if(null != splitWords && splitWords.size() > 1){
+                mapStreetHouseNumber = getStreetAndHouseNumberFromAddress(newAct.BillingStreet);
+                         System.debug('substringvalues'+mapStreetHouseNumber);
+                    }
+                    else{
+                        streetCheck = USLeadConversionHelper.streetCheck(newAct.BillingStreet);
+                    }
+                    
+                    if(streetCheck.values() != null && !streetCheck.isEmpty()){
+                        flag = (Boolean)streetCheck.get('flag');
+                        streetName = (string)streetCheck.get('streetSplitName');
+                        houseNumber = (string)streetCheck.get('housNum'); 
+                    }
+                    
+                    if(flag){
+                        newAct.Billing_House_Number__c = null;
+                        newAct.Billing_Street_Name__c = streetName;
+                        newAct.Additional_Address_Start_Date__c = System.today();
+                        accountToBeUpdated = true;
+                    }
+                    else if(!flag && streetName !=null && houseNumber!=null){
+                        newAct.Billing_House_Number__c = houseNumber;
+                        newAct.Billing_Street_Name__c = streetName;
+                        newAct.Additional_Address_Start_Date__c = System.today();
+                        accountToBeUpdated = true;
+                    }
+                    else if(null != mapStreetHouseNumber && mapStreetHouseNumber.size() > 0){
+                    newAct.Billing_House_Number__c = mapStreetHouseNumber.get('HouseNumber');
+                    newAct.Billing_Street_Name__c = mapStreetHouseNumber.get('StreetName');
+                    newAct.Additional_Address_Start_Date__c = System.today();
+                    accountToBeUpdated = true;
+                }
+                    // WHCRM-60574
+                    //mapStreetHouseNumber = getStreetAndHouseNumberFromAddress(newAct.BillingStreet);
+                system.debug('mapStreetHouseNumber =>'+mapStreetHouseNumber);
+                    
+            }
+            
+            if(null != newAct.ShippingStreet && (null == oldAct || oldAct.ShippingStreet != newAct.ShippingStreet)){
+                //if(oldAct.ShippingStreet != newAct.ShippingStreet && null != newAct.ShippingStreet){
+                system.debug('## handleAddressChange: As expected 2');
+                mapStreetHouseNumber = getStreetAndHouseNumberFromAddress(newAct.ShippingStreet);
+                if(null != mapStreetHouseNumber && mapStreetHouseNumber.size() > 0){
+                    newAct.Shipping_House_Number__c = mapStreetHouseNumber.get('HouseNumber');
+                    newAct.Shipping_Street_Name__c = mapStreetHouseNumber.get('StreetName');
+                    newAct.Business_Address_Start_Date__c = System.today();
+                    accountToBeUpdated = true;
+                }
+            }
+            
+            if(null != newAct.PersonOtherStreet && (null == oldAct || oldAct.PersonOtherStreet != newAct.PersonOtherStreet)){
+                system.debug('## handleAddressChange: As expected 3');
+                mapStreetHouseNumber = getStreetAndHouseNumberFromAddress(newAct.PersonOtherStreet);
+                if(null != mapStreetHouseNumber && mapStreetHouseNumber.size() > 0){
+                    //Added if condition for WHCRM-18094 
+                    if(mapStreetHouseNumber.get('HouseNumber')!=null){
+                    newAct.PersonOtherAddress_House_Number__c = mapStreetHouseNumber.get('HouseNumber');
+                    }
+                    //Added if condition for WHCRM-18094 
+                     if(mapStreetHouseNumber.get('StreetName')!=null){
+                    newAct.PersonOtherAddress_Street_Name__c = mapStreetHouseNumber.get('StreetName');
+                     }
+                    newAct.Work_Address_Start_Date__c = System.today();
+                    accountToBeUpdated = true;
+                }
+            }
+            
+            if(null != newAct.PersonMailingStreet && (null == oldAct || oldAct.PersonMailingStreet != newAct.PersonMailingStreet)){
+                system.debug('## handleAddressChange: As expected 4');
+                    // WHCRM-60574
+                    Map<String,object> streetCheck = new Map<String,object>();
+                    Boolean flag = false;
+                    String streetName;
+                    String houseNumber;
+                    String[] splitWords = newAct.PersonMailingStreet.split(' ',0);
+                    if(null != splitWords && splitWords.size() > 1){
+                mapStreetHouseNumber = getStreetAndHouseNumberFromAddress(newAct.PersonMailingStreet);
+                if(null != mapStreetHouseNumber && mapStreetHouseNumber.size() > 0 ){
+                    //Added if condition for WHCRM-18094 
+                    if(mapStreetHouseNumber.get('HouseNumber')!=null){
+                    newAct.PersonMailingAddress_House_Number__c = mapStreetHouseNumber.get('HouseNumber');
+                    }
+                    //Added if condition for WHCRM-18094 
+                    if(mapStreetHouseNumber.get('StreetName')!=null){
+                    newAct.PersonMailingAddress_Street_Name__c = mapStreetHouseNumber.get('StreetName');
+                    }
+                    newAct.Privat_Address_Start_Date__c = System.today();
+                    accountToBeUpdated = true;
+                    
+                }
+            }
+      }
+            
+            
+            if(String.isBlank(newAct.BillingStreet)){
+                newAct.Billing_House_Number__c = null;
+                newAct.Billing_Street_Name__c = null;
+            }
+            if(String.isBlank(newAct.ShippingStreet)){
+                newAct.Shipping_House_Number__c = null;
+                newAct.Shipping_Street_Name__c = null;
+            }
+            if(String.isBlank(newAct.PersonOtherStreet)){
+                newAct.PersonOtherAddress_House_Number__c = null;
+                newAct.PersonOtherAddress_Street_Name__c = null;
+            }
+            if(String.isBlank(newAct.PersonMailingStreet)){
+                newAct.PersonMailingAddress_House_Number__c = null;
+                newAct.PersonMailingAddress_Street_Name__c = null;
+            }
+            // WHCRM-53795 adding US Market Lead logic for Account
+            if(leadAccountId.containsKey(newAct.Id+''+newAct.GCID__c)){
+                 //WHCRM-60574
+                if(oldAct !=null && oldAct.PersonHomePhone != null){
+                newAct.PersonHomePhone = oldAct.PersonHomePhone;
+                }
+                //WHCRM-60574
+                newAct.BillingCity = '';
+                newAct.BillingState = '';
+                newAct.BillingCountry = '';
+                newAct.BillingStreet = '';
+                newAct.BillingPostalCode = '';
+            }
+            else{
+            if(newAct.isPersonAccount && newAct.Phone != null){
+                newAct.PersonHomePhone = newAct.Phone;
+            }
+        }
+            // WHCRM-53795 adding US Market Lead logic for Account
+        }
+        
+        system.debug('## account after handleAddressChange method');
+    }
+}
+    //Update GCID and UCID on Lead from corresponding Account once 
+    public void afterUpdateInegrationSpecifics(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap)
+    { 
+        List<Lead> leadUpdatelist = new List<Lead>();
+        Account oldAct = null;
+        Map<Id,Id> accountIdLeadIdMap = new Map<Id,Id>();
+        Map<Id,Account> processGCID_UCIDMap = new Map<Id,Account>();
+        Set<Id> accountIdSet = new Set<Id>();
+        for(Account newAct: newList){
+            if(null != oldMap)
+            {
+                oldAct = oldMap.get(newAct.Id);               
+            }
+            if(newAct.GCID__c != null && newAct.GCID__c != oldAct.GCID__c
+               && newAct.UCID__c != null && newAct.UCID__c != oldAct.UCID__c )
+            {
+                accountIdSet.add(newAct.id);
+                processGCID_UCIDMap.put(newAct.id,newAct);           
+                
+            }
+        } 
+       
+        if(!accountIdSet.isEmpty() && accountIdSet.contains(null)){
+            accountIdSet.remove(null);
+        }
+        if(!accountIdSet.isEmpty()){
+            for(Lead lead : [Select Id,AccountId__c,LeadSource From Lead where AccountId__c IN: accountIdSet and LeadSource = 'WHCRM-Agent'])
+            {
+                if(!accountIdLeadIdMap.containsKey(lead.AccountId__c) && lead.AccountId__c != null)
+                {
+                    accountIdLeadIdMap.put(lead.AccountId__c,lead.Id);   
+                }    
+            }
+            System.debug('accountIdLeadIdMap::'+accountIdLeadIdMap);
+            for(Account account : processGCID_UCIDMap.values())
+            {
+                if(accountIdLeadIdMap.containsKey(account.Id) && accountIdLeadIdMap.get(account.Id) != null)
+                {
+                    Lead leadUpdate = new Lead(Id = accountIdLeadIdMap.get(account.Id));
+                    leadUpdate.GCID__c = account.GCID__c;
+                    leadUpdate.UCID__c = account.UCID__c;
+                    leadUpdatelist.add(leadUpdate);
+                }
+            }
+            System.debug('leadUpdatelistleadUpdatelist::'+leadUpdatelist);
+            if(!leadUpdatelist.isEmpty())
+            {
+                update leadUpdatelist; 
+            }
+        }
+    }
+    
+    /*public void handleEmailAddresses(Boolean isInsert, List<Account> newList, Map<Id,Account> oldMap)
+    { 
+        for(Account acc: newList){
+            //copy business email to Private email on insert
+            if(acc.IsPersonAccount){
+                if(isInsert){
+                    if(acc.PersonEmail == null && acc.Business_Email__pc != null){
+                        acc.PersonEmail = acc.Business_Email__pc;
+                        system.debug('Private Email : '+acc.PersonEmail);
+                    }
+                }else{
+                    //copy business email to Private email on update
+                    if(acc.PersonEmail == null && acc.Business_Email__pc != null){
+                        acc.PersonEmail = acc.Business_Email__pc;
+                        system.debug('Private Email : '+acc.PersonEmail);
+                    }
+                }
+            }
+        }
+    }*/
+    
+        public void publishPEOnIntegrationUserUpdate(Boolean isInsert, List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap)
+    {  
+        system.debug('inside publishPEOnIntegrationUserUpdate method ');
+        PublishCustomerPlatformEventHandler accPEhandler = new PublishCustomerPlatformEventHandler();
+        
+        List<Account> lstAccountsToBeAddedToPE = new List<Account>();
+        
+        if(isInsert){
+           for (Account a : newList ){
+                  //WHCRM-57529: Changed Technical System Source to Last_Modified_System__c
+                    if(string.isNotBlank(a.Last_Modified_System__c))
+                    lstAccountsToBeAddedToPE.add(a);
+                                      
+            }
+            
+            if(null != lstAccountsToBeAddedToPE && lstAccountsToBeAddedToPE.size() > 0){
+                //call method to publish events on insert
+                try{
+                    accPEhandler.createPlatformEvenetOnAccountInsert(lstAccountsToBeAddedToPE);
+                }
+                catch(Exception e){
+                    sendErrorsAsPlatformEvent(lstAccountsToBeAddedToPE,'insert',e);
+                }
+            }
+        }
+        else if(!isInsert){
+            system.debug('inside update');
+            List<Log__c> olstlog = new List<Log__c>(); //WHCRM-57529: Added for Logging
+            for (Account newAct : newList ){
+                
+                //Identify the original record
+                Account oldAct = oldmap.get(newAct.Id);
+                
+                //Initialize the helper object and inject the old and new account record
+                HelperUtility helper = new HelperUtility(oldAct, newAct);
+                
+                //Create a list of fields that we want to check.
+                List<String> fieldList = Constants.Customer_fieldListRelevantForUpdate;
+                
+                //Run the helper method
+                Boolean pass = helper.hasAnyFieldChanged(fieldList);
+                //WHCRM-57529: Added for Logging
+                String enableLogging = System.Label.isAccountPEEligible;
+                System.debug('enableLogging: '+enableLogging);                
+                if(pass && enableLogging == 'Y'){
+                    Log__c olog = new Log__c();
+                    olog.Comments__c = 'isAccountPEEligible-Yes';
+                    olog.NetworkName__c = (String)newAct.Id;
+                    olstlog.add(olog);
+                }else if(!pass && enableLogging == 'Y'){
+                    Log__c olog = new Log__c();
+                    olog.Comments__c = 'isAccountPEEligible-No';
+                    olog.NetworkName__c = (String)newAct.Id;
+                    olstlog.add(olog);
+                }
+                
+                //WHCRM-57529: Changed Technical System Source to Last_Modified_System__c                
+                if(pass && string.isNotBlank(newAct.Last_Modified_System__c)){
+                    lstAccountsToBeAddedToPE.add(newAct);
+                    system.debug('newAct '+newAct);
+                }
+                
+            }
+            //WHCRM-57529: Added for Logging
+            if(!olstlog.isEmpty()){
+                    Database.insert(olstlog);
+            }
+            if(null != lstAccountsToBeAddedToPE && lstAccountsToBeAddedToPE.size() > 0){
+                //call method to publish events on update
+                try{
+                    //Populate Active ADR
+                    //populateActiveADR(newList);
+                    accPEhandler.createPlatformEvenetOnAccountUpdate(lstAccountsToBeAddedToPE,accountIdDealerInfoMapProcessing);
+                }
+                catch(Exception e){
+                    sendErrorsAsPlatformEvent(lstAccountsToBeAddedToPE,'update',e);      
+                }
+            }
+        }
+    }
+
+    //Shareable Account Handling
+    public void createShareableAccounts(Map<Id,Account> newMap){
+        Map<String,String> accountToShareableAccountMapping = new Map<String,String>
+        {               
+            'Salutation'=>'Salutation',
+            'FirstName'=>'FirstName',
+            'LastName'=>'LastName',
+            'MiddleName'=>'MiddleName',
+            'Suffix'=>'Suffix',
+            'Company__c'=>'Shareable_Account_Company__c',
+            'PersonBirthdate'=>'BirthDate',
+            'BMW_Unit__c'=>'Shareable_Account_BMW_Unit__c',
+            'GCID__c'=>'Shareable_Account_GCID__c',            
+            'UCID__c'=>'Shareable_Account_UCID__c',
+            'Customer_Title__c'=>'Shareable_Account_Customer_Title__c',
+
+            //Communication
+            'PersonEmail'=>'Shareable_Account_Person_Email__c',   
+            'PersonMobilePhone'=>'Shareable_Account_Person_Mobile_Phone__c',                        
+            'Business_mobile_phone__c'=>'Shareable_Account_Business_Mobile_Phone__c',
+            'PersonHomePhone'=>'Shareable_Account_Home_Phone__c',
+            'PersonOtherPhone'=>'Shareable_Account_Other_Phone__c',
+            'Business_Email__pc'=>'Shareable_Account_Business_Email__c',
+
+            'Fax'=>'Shareable_Account_Fax__c',
+            'Additional_Fax__c'=>'Shareable_Account_Other_Fax__c',
+            'Last_Modified_Date_Source__c'=>'Shareable_Account_Last_Mod_Date_Source__c', 
+            'Business_System_Source__c'=>'Shareable_Account_Last_Modified_System__c',
+
+            //Address Infomation
+            'PersonMailingAddress_Street_Name__c'=>'Shareable_Account_Mailing_Address_Street__c',            
+            'PersonMailingAddress_House_Number__c'=>'Shareable_Account_Mailing_House_Number__c',
+            'PersonMailingCity'=>'Shareable_Account_Mailing_City__c',
+            'PersonMailingPostalCode'=>'Shareable_Account_Mailing_Postal_Code__c',
+            'PersonMailingCountry'=>'Shareable_Account_Mailing_Country__c',
+
+            //Person Account - Other Person 
+            'PersonOtherAddress_Street_Name__c'=>'Shareable_Account_OtherAddress_Street__c',
+            'PersonOtherAddress_House_Number__c'=>'Shareable_Account_Other_House_Number__c',
+            'PersonOtherCity'=>'Shareable_Account_Other_City__c',
+            'PersonOtherPostalCode'=>'Shareable_Account_Other_Postal_Code__c',            
+            'PersonOtherCountry'=>'Shareable_Account_Other_Country__c',
+            /*
+            //Business Account - Shipping
+            'Shipping_Street_Name__c'=>'Shareable_Account_Shipping_Street_Name__c',
+            'Shipping_House_Number__c'=>'Shareable_Account_Shipping_House_Number__c',
+            'ShippingCity'=>'Shareable_Account_Shipping_City__c',
+            'ShippingPostalCode'=>'Shareable_Account_Shipping_Postal_Code__c',
+            'ShippingCountry'=>'Shareable_Account_Shipping_Country__c',
+
+            //Business Account - Billing
+            'Billing_Street_Name__c'=>'Shareable_Account_Billing_Street_Name__c',
+            'Billing_House_Number__c'=>'Shareable_Account_Billing_House_Number__c',            
+            'BillingCity'=>'Shareable_Account_Billing_City__c',
+            'BillingPostalCode'=>'Shareable_Account_Billing_Postal_Code__c',
+            'BillingCountry'=>'Shareable_Account_Billing_Country__c', 
+            */
+            //Post box
+            'Post_Box__c'=>'Shareable_Account_Post_Box__c',
+            'Work_Post_Box__c'=>'Shareable_Account_Work_Post_Box__c',
+            'Additional_Post_Box__c'=> 'Shareable_Account_Additional_Post_Box__c'
+              
+        };
+        Map<String,String> businessAccountToShareableAccountMapping = new Map<String,String>
+        {               
+            'Name'=>'LastName', 
+            'Company__c'=>'Shareable_Account_Company__c',
+            'BMW_Unit__c'=>'Shareable_Account_BMW_Unit__c',
+            'GCID__c'=>'Shareable_Account_GCID__c',            
+            'UCID__c'=>'Shareable_Account_UCID__c',
+        
+            'Corporate_Business_Email__c'=>'Shareable_Account_Business_Email__c',
+            'Business_mobile_phone__c'=>'Shareable_Account_Business_Mobile_Phone__c',
+            'Phone'=>'Shareable_Account_Other_Phone__c',
+
+            'Fax'=>'Shareable_Account_Fax__c',
+            'Additional_Fax__c'=>'Shareable_Account_Other_Fax__c',
+            'Last_Modified_Date_Source__c'=>'Shareable_Account_Last_Mod_Date_Source__c',
+            'Business_System_Source__c'=>'Shareable_Account_Last_Modified_System__c',
+
+            //Business Account - Shipping
+            'Shipping_Street_Name__c'=>'Shareable_Account_Shipping_Street_Name__c',
+            'Shipping_House_Number__c'=>'Shareable_Account_Shipping_House_Number__c',
+            'ShippingCity'=>'Shareable_Account_Shipping_City__c',
+            'ShippingPostalCode'=>'Shareable_Account_Shipping_Postal_Code__c',
+            'ShippingCountry'=>'Shareable_Account_Shipping_Country__c',
+
+            //Business Account - Billing
+            'Billing_Street_Name__c'=>'Shareable_Account_Billing_Street_Name__c',
+            'Billing_House_Number__c'=>'Shareable_Account_Billing_House_Number__c',            
+            'BillingCity'=>'Shareable_Account_Billing_City__c',
+            'BillingPostalCode'=>'Shareable_Account_Billing_Postal_Code__c',
+            'BillingCountry'=>'Shareable_Account_Billing_Country__c', 
+
+            //Post box
+            'Post_Box__c'=>'Shareable_Account_Post_Box__c',
+            'Work_Post_Box__c'=>'Shareable_Account_Work_Post_Box__c',
+            'Additional_Post_Box__c'=> 'Shareable_Account_Additional_Post_Box__c'
+            
+        };
+
+        List<Individual> shareableAccountList = new List<Individual>();
+        for(Account newAccount : newMap.values()){ 
+            System.debug('Person Account ::'+newAccount.isPersonAccount); 
+            System.debug('newAccount.Technical_System_Source__c::'+newAccount.Technical_System_Source__c);
+            if(newAccount.isPersonAccount)  {        
+                Individual shareableAccount = new Individual();
+                if(newAccount.Technical_System_Source__c !=null && newAccount.Technical_System_Source__c.contains('DLR')){
+                    shareableAccount.Salutation = newAccount.Salutation;
+                    shareableAccount.FirstName = newAccount.FirstName;
+                    shareableAccount.LastName = newAccount.LastName;
+                    shareableAccount.MiddleName= newAccount.MiddleName;
+                    shareableAccount.Suffix= newAccount.Suffix;
+                    shareableAccount.Shareable_Account_Customer_Title__c = newAccount.Customer_Title__c;
+                }
+                else{
+                   for(String field : accountToShareableAccountMapping.keySet()){
+                        if(newAccount.get(field) != null) {
+                            System.debug('accountToShareableAccountMapping.get(field)::'+accountToShareableAccountMapping.get(field));
+                            shareableAccount.put(accountToShareableAccountMapping.get(field),newAccount.get(field));
+                        }
+                    }
+                }
+            
+                shareableAccount.Account__c = newAccount.id;
+                shareableAccount.Shareable_Account_GCID__c=newAccount.GCID__c;
+                shareableAccount.Technical_System_Source__c = newAccount.Technical_System_Source__c;
+                shareableAccount.Shareable_Account_Is_Person_Account__c = true;
+                shareableAccount.Shareable_Account_BMW_Unit__c = newAccount.BMW_Unit__c;
+                shareableAccountList.add(shareableAccount);
+                System.debug('shareableAccountList::'+shareableAccountList); 
+            }  
+            else{
+                Individual shareableAccount = new Individual();
+
+                if(newAccount.Technical_System_Source__c !=null && newAccount.Technical_System_Source__c.contains('DLR')){
+                    shareableAccount.LastName = newAccount.Name;
+                }
+                else{
+                  for(String field : businessAccountToShareableAccountMapping.keySet()){
+                      if(newAccount.get(field) != null) {
+                          System.debug('businessAccountToShareableAccountMapping.get(field)::'+businessAccountToShareableAccountMapping.get(field));
+                          shareableAccount.put(businessAccountToShareableAccountMapping.get(field),newAccount.get(field));
+                      }
+                      }
+                  }
+                shareableAccount.Account__c = newAccount.id;
+                shareableAccount.Shareable_Account_GCID__c=newAccount.GCID__c;
+                shareableAccount.Technical_System_Source__c = newAccount.Technical_System_Source__c;
+                shareableAccount.Shareable_Account_Is_Person_Account__c = false; 
+                shareableAccount.Shareable_Account_BMW_Unit__c = newAccount.BMW_Unit__c;
+                shareableAccount.LastName = newAccount.Name; //WHCRM-44696 Required field Missing : LastName  
+                shareableAccountList.add(shareableAccount);
+                System.debug('shareableAccountList::'+shareableAccountList); 
+            }         
+        }
+        if(!shareableAccountList.isEmpty()){
+            insert shareableAccountList;
+        }
+    }
+    //Shareable Account Handling
+    public void updateShareableAccounts(Map<Id,Account> oldMap,Map<Id,Account> newMap){
+        Map<Id,Account> oldAccountMap = oldMap;
+        Map<Id,boolean> accountPersonOrNotMap = new Map<Id,boolean>();
+        Map<String,String> accountReferenceFields = new Map<String,String>();
+        Map<String,String> accountIdBUNOMap = new Map<String,String>();        
+        String[] personAccountFields;
+        String[] businessAccountFields;
+        Map<Id,Id> accountIdShareableAccountIdMap = new Map<Id,Id>();
+
+        Map<String,String> accountToShareableAccountMapping = new Map<String,String>
+        {               
+            'Salutation'=>'Salutation',
+            'FirstName'=>'FirstName',
+            'LastName'=>'LastName',
+            'MiddleName'=>'MiddleName',
+            'Suffix'=>'Suffix',
+            'Company__c'=>'Shareable_Account_Company__c',
+            'PersonBirthdate'=>'BirthDate',
+            'BMW_Unit__c'=>'Shareable_Account_BMW_Unit__c',
+            'GCID__c'=>'Shareable_Account_GCID__c',            
+            'UCID__c'=>'Shareable_Account_UCID__c',
+            'Customer_Title__c'=>'Shareable_Account_Customer_Title__c',
+
+            //Communication
+            'PersonEmail'=>'Shareable_Account_Person_Email__c',   
+            'PersonMobilePhone'=>'Shareable_Account_Person_Mobile_Phone__c',                        
+            'Business_mobile_phone__c'=>'Shareable_Account_Business_Mobile_Phone__c',
+            'PersonHomePhone'=>'Shareable_Account_Home_Phone__c',
+            'PersonOtherPhone'=>'Shareable_Account_Other_Phone__c',
+            'Business_Email__pc'=>'Shareable_Account_Business_Email__c',
+
+            'Fax'=>'Shareable_Account_Fax__c',
+            'Additional_Fax__c'=>'Shareable_Account_Other_Fax__c',
+            'Last_Modified_Date_Source__c'=>'Shareable_Account_Last_Mod_Date_Source__c',
+            'Business_System_Source__c'=>'Shareable_Account_Last_Modified_System__c',
+
+            //Address Infomation
+            'PersonMailingAddress_Street_Name__c'=>'Shareable_Account_Mailing_Address_Street__c',            
+            'PersonMailingAddress_House_Number__c'=>'Shareable_Account_Mailing_House_Number__c',
+            'PersonMailingCity'=>'Shareable_Account_Mailing_City__c',
+            'PersonMailingPostalCode'=>'Shareable_Account_Mailing_Postal_Code__c',
+            'PersonMailingCountry'=>'Shareable_Account_Mailing_Country__c',
+
+            //Person Account - Other Person 
+            'PersonOtherAddress_Street_Name__c'=>'Shareable_Account_OtherAddress_Street__c',
+            'PersonOtherAddress_House_Number__c'=>'Shareable_Account_Other_House_Number__c',
+            'PersonOtherCity'=>'Shareable_Account_Other_City__c',
+            'PersonOtherPostalCode'=>'Shareable_Account_Other_Postal_Code__c',            
+            'PersonOtherCountry'=>'Shareable_Account_Other_Country__c',
+            /*
+            //Business Account - Shipping
+            'Shipping_Street_Name__c'=>'Shareable_Account_Shipping_Street_Name__c',
+            'Shipping_House_Number__c'=>'Shareable_Account_Shipping_House_Number__c',
+            'ShippingCity'=>'Shareable_Account_Shipping_City__c',
+            'ShippingPostalCode'=>'Shareable_Account_Shipping_Postal_Code__c',
+            'ShippingCountry'=>'Shareable_Account_Shipping_Country__c',
+
+            //Business Account - Billing
+            'Billing_Street_Name__c'=>'Shareable_Account_Billing_Street_Name__c',
+            'Billing_House_Number__c'=>'Shareable_Account_Billing_House_Number__c',            
+            'BillingCity'=>'Shareable_Account_Billing_City__c',
+            'BillingPostalCode'=>'Shareable_Account_Billing_Postal_Code__c',
+            'BillingCountry'=>'Shareable_Account_Billing_Country__c', 
+            */
+            //Post box
+            'Post_Box__c'=>'Shareable_Account_Post_Box__c',
+            'Work_Post_Box__c'=>'Shareable_Account_Work_Post_Box__c',
+            'Additional_Post_Box__c'=> 'Shareable_Account_Additional_Post_Box__c',
+
+      //Stop Flags
+      'Stop_Communication_BMW_AG__c'=>'Shareable_Account_Stop_Communication_BMW__c',
+      'Stop_Communication_Retail__c'=>'Shareable_Account_Stop_Communication_Ret__c',
+      'Stop_Market_Research__c'=>'Shareable_Account_Stop_Market_Research__c'
+              
+        };
+
+        Map<String,String> businessAccountToShareableAccountMapping = new Map<String,String>
+        {               
+            'Name'=>'LastName', 
+            'Company__c'=>'Shareable_Account_Company__c',
+            'BMW_Unit__c'=>'Shareable_Account_BMW_Unit__c',
+            'GCID__c'=>'Shareable_Account_GCID__c',            
+            'UCID__c'=>'Shareable_Account_UCID__c',
+        
+            'Corporate_Business_Email__c'=>'Shareable_Account_Business_Email__c',
+            'Business_mobile_phone__c'=>'Shareable_Account_Business_Mobile_Phone__c',
+            'Phone'=>'Shareable_Account_Other_Phone__c',
+
+            'Fax'=>'Shareable_Account_Fax__c',
+            'Additional_Fax__c'=>'Shareable_Account_Other_Fax__c',
+            'Last_Modified_Date_Source__c'=>'Shareable_Account_Last_Mod_Date_Source__c',
+            'Business_System_Source__c'=>'Shareable_Account_Last_Modified_System__c',
+
+            //Business Account - Shipping
+            'Shipping_Street_Name__c'=>'Shareable_Account_Shipping_Street_Name__c',
+            'Shipping_House_Number__c'=>'Shareable_Account_Shipping_House_Number__c',
+            'ShippingCity'=>'Shareable_Account_Shipping_City__c',
+            'ShippingPostalCode'=>'Shareable_Account_Shipping_Postal_Code__c',
+            'ShippingCountry'=>'Shareable_Account_Shipping_Country__c',
+
+            //Business Account - Billing
+            'Billing_Street_Name__c'=>'Shareable_Account_Billing_Street_Name__c',
+            'Billing_House_Number__c'=>'Shareable_Account_Billing_House_Number__c',            
+            'BillingCity'=>'Shareable_Account_Billing_City__c',
+            'BillingPostalCode'=>'Shareable_Account_Billing_Postal_Code__c',
+            'BillingCountry'=>'Shareable_Account_Billing_Country__c', 
+
+            //Post box
+            'Post_Box__c'=>'Shareable_Account_Post_Box__c',
+            'Work_Post_Box__c'=>'Shareable_Account_Work_Post_Box__c',
+            'Additional_Post_Box__c'=> 'Shareable_Account_Additional_Post_Box__c',
+       
+      //Stop Flags
+      'Stop_Communication_BMW_AG__c'=>'Shareable_Account_Stop_Communication_BMW__c',
+      'Stop_Communication_Retail__c'=>'Shareable_Account_Stop_Communication_Ret__c',
+      'Stop_Market_Research__c'=>'Shareable_Account_Stop_Market_Research__c'
+            
+        };
+        //Address fields
+        Map<String,String> addressFieldsMapping = new Map<String,String>
+        {
+            //Address Infomation
+            'PersonMailingAddress_Street_Name__c'=>'Shareable_Account_Mailing_Address_Street__c',            
+            'PersonMailingAddress_House_Number__c'=>'Shareable_Account_Mailing_House_Number__c',
+            'PersonMailingCity'=>'Shareable_Account_Mailing_City__c',
+            'PersonMailingPostalCode'=>'Shareable_Account_Mailing_Postal_Code__c',
+            'PersonMailingCountry'=>'Shareable_Account_Mailing_Country__c',
+
+            //Person Account - Other Person 
+            'PersonOtherAddress_Street_Name__c'=>'Shareable_Account_OtherAddress_Street__c',
+            'PersonOtherAddress_House_Number__c'=>'Shareable_Account_Other_House_Number__c',
+            'PersonOtherCity'=>'Shareable_Account_Other_City__c',
+            'PersonOtherPostalCode'=>'Shareable_Account_Other_Postal_Code__c',            
+            'PersonOtherCountry'=>'Shareable_Account_Other_Country__c',
+            
+            //Business Account - Shipping
+            'Shipping_Street_Name__c'=>'Shareable_Account_Shipping_Street_Name__c',
+            'Shipping_House_Number__c'=>'Shareable_Account_Shipping_House_Number__c',
+            'ShippingCity'=>'Shareable_Account_Shipping_City__c',
+            'ShippingPostalCode'=>'Shareable_Account_Shipping_Postal_Code__c',
+            'ShippingCountry'=>'Shareable_Account_Shipping_Country__c',
+
+            //Business Account - Billing
+            'Billing_Street_Name__c'=>'Shareable_Account_Billing_Street_Name__c',
+            'Billing_House_Number__c'=>'Shareable_Account_Billing_House_Number__c',            
+            'BillingCity'=>'Shareable_Account_Billing_City__c',
+            'BillingPostalCode'=>'Shareable_Account_Billing_Postal_Code__c',
+            'BillingCountry'=>'Shareable_Account_Billing_Country__c'                     
+        };
+        //Get Shareable Account 
+        Map<Id,Account> accountsWithNoShareableAcc = new Map<Id,Account>();
+        for(Account acc : [Select id,isPersonAccount,Technical_System_Source__c,(Select id From Shareable_Accounts__r) From Account where id IN: newMap.keySet()]){
+            accountPersonOrNotMap.put(acc.id,acc.isPersonAccount);
+            if(acc.Shareable_Accounts__r.size() == 1){
+                accountIdShareableAccountIdMap.put(acc.Id,acc.Shareable_Accounts__r[0].id);
+            }
+            if(acc.Technical_System_Source__c != null && acc.Technical_System_Source__c.contains('-')){
+                String BUNOStr = acc.Technical_System_Source__c.substringAfter('-');
+                accountIdBUNOMap.put(acc.id,BUNOStr);
+            }
+        }
+
+        for(Shareable_Account_Handling__mdt shrMdt : [Select Label,Allowed_Fields__c From Shareable_Account_Handling__mdt]){
+            accountReferenceFields.put(shrMdt.Label,shrMdt.Allowed_Fields__c);  
+        }
+
+        if(accountReferenceFields.containsKey('Person')){
+            personAccountFields = accountReferenceFields.get('Person').split(',');
+        }
+        if(accountReferenceFields.containsKey('Business')){
+            businessAccountFields = accountReferenceFields.get('Business').split(',');
+        }
+        System.debug('personAccountFields::'+personAccountFields);
+        System.debug('businessAccountFields::'+businessAccountFields);
+        //List<Individual> shareableAccountList = new List<Individual>();
+        Map<Id,Individual> shareableAccountMap = new Map<Id,Individual>();
+        for(Account newAccount : newMap.values()){  
+            //Person Account Handling         
+            //WHCRM-44696 Added isPersonAccount checking  
+            if(oldMap.containsKey(newAccount.Id) && personAccountFields != null && accountIdShareableAccountIdMap.containsKey(newAccount.Id) && newAccount.isPersonAccount){
+                Account oldAccount = oldMap.get(newAccount.Id);
+                Individual shareableAccount = new Individual();                 
+                shareableAccount.Id = accountIdShareableAccountIdMap.get(newAccount.Id);            
+                shareableAccount.LastName = newAccount.LastName;
+                //Iterating over fields
+                for(String field : personAccountFields){
+                    System.debug('fieldfield::'+field);
+                    System.debug('--------new '+newAccount.get(field)); 
+                    System.debug('--------old '+oldAccount.get(field));
+                    //Field values are different "Niederlassung", (Owner ID=00027) or Normal Update then update data
+                    if(newAccount.get(field) != oldAccount.get(field) && newAccount.Technical_System_Source__c != null){
+                        System.debug('Fields values changed');
+                        if( field == 'Stop_Communication_BMW_AG__c' ){
+                            shareableAccount.Shareable_Account_Stop_Communication_BMW__c = newAccount.Stop_Communication_BMW_AG__c;
+                        }
+                        if( field == 'Stop_Communication_Retail__c' ){
+                            shareableAccount.Shareable_Account_Stop_Communication_Ret__c = newAccount.Stop_Communication_Retail__c;
+                        }
+                        if( field == 'Stop_Market_Research__c' ){
+                            shareableAccount.Shareable_Account_Stop_Market_Research__c = newAccount.Stop_Market_Research__c;
+                        }
+                        if(!newAccount.Technical_System_Source__c.containsIgnoreCase('DLR')){
+                            if(accountToShareableAccountMapping.containsKey(field)){
+                                if (addressFieldsMapping.containsKey(field)) {
+                                    shareableAccount.Shareable_Account_Mailing_Address_Street__c = newAccount.PersonMailingAddress_Street_Name__c;
+                                    shareableAccount.Shareable_Account_Mailing_House_Number__c = newAccount.PersonMailingAddress_House_Number__c;
+                                    shareableAccount.Shareable_Account_Mailing_City__c = newAccount.PersonMailingCity;
+                                    shareableAccount.Shareable_Account_Mailing_Postal_Code__c = newAccount.PersonMailingPostalCode;
+                                    shareableAccount.Shareable_Account_Mailing_Country__c = newAccount.PersonMailingCountry;
+                                    shareableAccount.Shareable_Account_OtherAddress_Street__c = newAccount.PersonOtherAddress_Street_Name__c;
+                                    shareableAccount.Shareable_Account_Other_House_Number__c = newAccount.PersonOtherAddress_House_Number__c;
+                                    shareableAccount.Shareable_Account_Other_City__c = newAccount.PersonOtherCity;
+                                    shareableAccount.Shareable_Account_Other_Postal_Code__c = newAccount.PersonOtherPostalCode;
+                                    shareableAccount.Shareable_Account_Other_Country__c = newAccount.PersonOtherCountry;
+                                }
+                                System.debug('Update Normal Account');
+                                shareableAccount.put(accountToShareableAccountMapping.get(field),newAccount.get(field));                                            
+                                //shareableAccountMap.put(shareableAccount.Id,shareableAccount);
+                                //System.debug('shareableAccountMap::'+shareableAccountMap);
+                            }
+                        } 
+                        /*
+              1. Update from Dealer then make fields null
+              2. WHCRM-44696 : Excluded lastname as field is required to insert/update the SharableAccount
+            */
+                        else if(newAccount.Technical_System_Source__c.containsIgnoreCase('DLR') && field != 'GCID__c' && field != 'UCID__c' && field != 'LastName') {
+                            System.debug('Non Niederlassung');
+                            if(accountToShareableAccountMapping.containsKey(field)){
+                                shareableAccount.put(accountToShareableAccountMapping.get(field),null);                                        
+                                //shareableAccountMap.put(shareableAccount.Id,shareableAccount);
+                            }
+                        }
+                        if(field == 'GCID__c' || field == 'UCID__c' && newAccount.get(field) != null && oldAccount.get(field) == null){
+                            System.debug('In GCID or UCID change');
+                            shareableAccount.put(accountToShareableAccountMapping.get(field),newAccount.get(field));                                            
+                            //shareableAccountMap.put(shareableAccount.Id,shareableAccount);  
+                        }
+                    }
+                } 
+                shareableAccountMap.put(shareableAccount.Id,shareableAccount);
+                System.debug('shareableAccountMap::'+shareableAccountMap);
+            }
+            //Business Account Handling
+            ////WHCRM-44696 Added !isPersonAccount checking
+            else if(oldMap.containsKey(newAccount.Id) && businessAccountFields != null && accountIdShareableAccountIdMap.containsKey(newAccount.Id) && !newAccount.IsPersonAccount){
+                Account oldAccount = oldMap.get(newAccount.Id);
+                Individual shareableAccount = new Individual();                             
+                shareableAccount.Id = accountIdShareableAccountIdMap.get(newAccount.Id);
+                shareableAccount.LastName = newAccount.Name;
+                
+                //Iterating over fields
+                for(String field : businessAccountFields){
+                    System.debug('field::'+field);
+                    if(newAccount.get(field) != oldAccount.get(field) && newAccount.Technical_System_Source__c != null){
+                        System.debug('Old value:'+newAccount.get(field)+' new ::'+newAccount.get(field));
+
+            if( field == 'Stop_Communication_BMW_AG__c' ){
+              shareableAccount.Shareable_Account_Stop_Communication_BMW__c = newAccount.Stop_Communication_BMW_AG__c;
+            }
+            if( field == 'Stop_Communication_Retail__c' ){
+              shareableAccount.Shareable_Account_Stop_Communication_Ret__c = newAccount.Stop_Communication_Retail__c;
+            }
+            if( field == 'Stop_Market_Research__c' ){
+              shareableAccount.Shareable_Account_Stop_Market_Research__c = newAccount.Stop_Market_Research__c;
+            }                      
+
+                        if(!newAccount.Technical_System_Source__c.containsIgnoreCase('DLR')){
+                            if(businessAccountToShareableAccountMapping.containsKey(field)){
+                                if (addressFieldsMapping.containsKey(field)) {
+                                    System.debug('An address field has been changed');
+                                    shareableAccount.Shareable_Account_Shipping_Street_Name__c = newAccount.Shipping_Street_Name__c;
+                                    shareableAccount.Shareable_Account_Shipping_House_Number__c = newAccount.Shipping_House_Number__c;
+                                    shareableAccount.Shareable_Account_Shipping_City__c = newAccount.ShippingCity;
+                                    shareableAccount.Shareable_Account_Shipping_Postal_Code__c = newAccount.ShippingPostalCode;
+                                    shareableAccount.Shareable_Account_Shipping_Country__c = newAccount.ShippingCountry;
+                                    shareableAccount.Shareable_Account_Billing_Street_Name__c = newAccount.Billing_Street_Name__c;
+                                    shareableAccount.Shareable_Account_Billing_House_Number__c = newAccount.Billing_House_Number__c;
+                                    shareableAccount.Shareable_Account_Billing_City__c = newAccount.BillingCity;
+                                    shareableAccount.Shareable_Account_Billing_Postal_Code__c = newAccount.BillingPostalCode;
+                                    shareableAccount.Shareable_Account_Billing_Country__c = newAccount.BillingCountry;                   
+                                }
+                                shareableAccount.put(businessAccountToShareableAccountMapping.get(field),newAccount.get(field));
+                            }
+                        }
+                        /*
+              1. Update from Dealer then make fields null
+              2. WHCRM-44696 : Excluded lastname as field is required to insert/update the SharableAccount
+            */
+                        else if(newAccount.Technical_System_Source__c.containsIgnoreCase('DLR') && field != 'GCID__c' && field != 'UCID__c' && field != 'LastName') {
+                            System.debug('Non Niederlassung');
+                            if(businessAccountToShareableAccountMapping.containsKey(field)){
+                                shareableAccount.put(businessAccountToShareableAccountMapping.get(field),null);                                        
+                                //shareableAccountMap.put(shareableAccount.Id,shareableAccount);
+                            }
+                        }
+                        if(field == 'GCID__c' || field == 'UCID__c' && newAccount.get(field) != null && oldAccount.get(field) == null){
+                            System.debug('In GCID or UCID change');
+                            shareableAccount.put(businessAccountToShareableAccountMapping.get(field),newAccount.get(field));                                            
+                            //shareableAccountMap.put(shareableAccount.Id,shareableAccount);  
+                        }
+                    }                   
+                    if(shareableAccount.LastName == null){ //WHCRM-44696 Required field Missing : LastName
+                       shareableAccount.LastName = newAccount.Name; //WHCRM-44696 Required field Missing : LastName
+                    }
+                }
+                shareableAccountMap.put(shareableAccount.Id,shareableAccount);
+            }
+        }
+        System.debug('******************shareableAccountMap:'+shareableAccountMap);
+        if(!shareableAccountMap.isEmpty()){
+            upsert shareableAccountMap.values();
+        }
+    } 
+    
+    public void calculateTheAccountRetentionDate(Account a){
+        
+        Date d = Date.today();
+        
+        if(a.MaxRetentionAccount__c != null){
+            a.Retention_Date__c = a.MaxRetentionAccount__c;
+            
+        }
+        if(a.MaxRetentionRequest__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null && a.Retention_Date__c < a.MaxRetentionRequest__c))){
+             a.Retention_Date__c = a.MaxRetentionRequest__c;
+              
+        }
+        if(a.MaxRetentionOpportunity__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null && a.Retention_Date__c < a.MaxRetentionOpportunity__c))){
+             a.Retention_Date__c = a.MaxRetentionOpportunity__c;
+        }
+        if(a.MaxRetentionOKU__c != null && a.Retention_Date__c < a.MaxRetentionOKU__c){
+             a.Retention_Date__c = a.MaxRetentionOKU__c;
+        }
+        if(a.RetentionMaxDateCase__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null && a.Retention_Date__c < a.RetentionMaxDateCase__c))){
+             a.Retention_Date__c = a.RetentionMaxDateCase__c;
+             
+        }
+        if(a.Customer_Retention_Date_Motorrad__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null &&a.Retention_Date__c < a.Customer_Retention_Date_Motorrad__c))){
+             a.Retention_Date__c = a.Customer_Retention_Date_Motorrad__c;
+        }
+        if(a.MaxRetentionArchived_Case__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null &&a.Retention_Date__c < a.MaxRetentionArchived_Case__c))){
+             a.Retention_Date__c = a.MaxRetentionArchived_Case__c;
+        }
+        if(a.MaxRetentionParticipation__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null &&a.Retention_Date__c < a.MaxRetentionParticipation__c))){
+             a.Retention_Date__c = a.MaxRetentionParticipation__c;
+        }
+        if(a.MaxRetentionAdditional_Vehicle__c != null && (a.Retention_Date__c==null || (a.Retention_Date__c!=null &&a.Retention_Date__c < a.MaxRetentionAdditional_Vehicle__c))){
+             a.Retention_Date__c = a.MaxRetentionAdditional_Vehicle__c;
+        }
+    }
+    
+    //Start: WHCRM-73629 Commented to improve code coverage percentage as it is not being used
+    //WHCRM-14952
+    /*public void removeCustomerCorporateNumber(List<Account> newList, List<Account> oldList, Map<Id,Account> newMap, Map<Id,Account> oldMap){ 
+        
+        
+        for (Account acc : newList){
+            if(acc.End_Date_Fleet_Customer__c != null && oldMap.get(acc.Id).End_Date_Fleet_Customer__c == null &&               
+               acc.recordTypeId == corporateRecordTypeId &&
+               !String.isEmpty(acc.Corporate_Customer_Number__c)){
+          acc.Corporate_Customer_Number__c = null;
+            }    
+        }    
+    }*/
+    //End: WHCRM-73629 Commented to improve code coverage percentage as it is not being used
+
+    
+    public void setAddressStartDate(List<Account> newList, Map<Id,Account> oldMap, String source){
+        Date addressStartDate = Date.today();
+        /*
+         * BillingStreet, BillingCity, BillingState, BillingPostalCode,
+       BillingCountry, BillingLatitude, BillingLongitude
+*/ 
+        for(Account acc : newList){
+          //Start : WHCRM-54633
+            if(acc.AccountSource != null && source == null){
+              source = acc.AccountSource;
+            }
+            //End : WHCRM-54633
+                      if(acc.RecordTypeId==corporateRecordTypeId){
+                  //WHCRM-54136: Start
+                  if(oldMap== null){
+              if(acc.BillingStreet!=null && acc.BillingCity != null && acc.BillingCountryCode != null && acc.BillingPostalCode != null){
+                acc.Additional_Address_Start_Date__c = addressStartDate;
+                     if(acc.Last_Modified_System__c!=null){
+                      acc.Source_of_Additional_Address__c = acc.Last_Modified_System__c; //WHCRM-55681
+                    }
+              }
+              if(acc.ShippingStreet!=null && acc.ShippingCity!=null && acc.ShippingCountryCode !=null && acc.ShippingPostalCode !=null){
+                      acc.Business_Address_Start_Date__c = addressStartDate;
+                    if(acc.Last_Modified_System__c!=null){
+                      acc.Source_of_Business_Address__c = acc.Last_Modified_System__c; //WHCRM-55681
+                    }
+              }
+          }//WHCRM-54136: end
+                  else{
+          if(acc.BillingAddress!=oldMap.get(acc.Id).BillingAddress || acc.BillingStreet!=oldMap.get(acc.Id).BillingStreet || acc.BillingCity!=oldMap.get(acc.Id).BillingCity || acc.BillingCountry!=oldMap.get(acc.Id).BillingCountry || acc.BillingPostalCode!=oldMap.get(acc.Id).BillingPostalCode || acc.BillingState!=oldMap.get(acc.Id).BillingState || acc.BillingLongitude!=oldMap.get(acc.Id).BillingLongitude || acc.BillingLatitude!=oldMap.get(acc.Id).BillingLatitude){
+            acc.Additional_Address_Start_Date__c = addressStartDate;
+            acc.Additional_Address_Undeliverable__c = false;
+            if(acc.Last_Modified_System__c!=null){
+                    acc.Source_of_Additional_Address__c = acc.Last_Modified_System__c;
+            }
+          }
+                //WHCRM-51065
+                if(String.isBlank(acc.BillingStreet) && String.isBlank(acc.BillingCity) && String.isBlank(acc.BillingCountryCode) && String.isBlank(acc.BillingPostalCode) && String.isBlank(acc.BillingState) && acc.BillingLongitude == null && acc.BillingLatitude == null ){
+                    acc.Additional_Address_Start_Date__c = null;
+                    acc.Source_of_Additional_Address__c = null;
+                }//WHCRM-51065
+
+          if(acc.ShippingAddress!=oldMap.get(acc.Id).ShippingAddress || acc.ShippingStreet!=oldMap.get(acc.Id).ShippingStreet || acc.ShippingCity!=oldMap.get(acc.Id).ShippingCity || acc.ShippingCountry!=oldMap.get(acc.Id).ShippingCountry || acc.ShippingPostalCode!=oldMap.get(acc.Id).ShippingPostalCode || acc.ShippingState!=oldMap.get(acc.Id).ShippingState || acc.ShippingLongitude!=oldMap.get(acc.Id).ShippingLongitude || acc.ShippingLatitude!=oldMap.get(acc.Id).ShippingLatitude){
+            acc.Business_Address_Start_Date__c = addressStartDate;
+            acc.Business_Address_Undeliverable__c = false;
+            if(acc.Last_Modified_System__c!=null){
+                    acc.Source_of_Business_Address__c = acc.Last_Modified_System__c;
+            }
+    
+                //WHCRM-51065
+                if(String.isBlank(acc.ShippingStreet) && String.isBlank(acc.ShippingCity) && String.isBlank(acc.ShippingCountryCode) && String.isBlank(acc.ShippingPostalCode) && String.isBlank(acc.ShippingState) && acc.ShippingLongitude == null && acc.ShippingLatitude == null ){
+                    acc.Business_Address_Start_Date__c = null;
+                    acc.Source_of_Business_Address__c = null;
+                }//WHCRM-51065
+
+          }
+               }
+            }else if(acc.IsPersonAccount){
+                  //WHCRM-54136: Start
+            if(oldMap == null){
+                        if(acc.PersonOtherStreet !=null && acc.PersonOtherCity !=null    && acc.PersonOtherCountryCode !=null && acc.PersonOtherPostalCode !=null){
+                            acc.Work_Address_Start_Date__c = addressStartDate;
+                               if(acc.Last_Modified_System__c!=null){
+                                  acc.Source_of_Work_Address__c = acc.Last_Modified_System__c; //WHCRM-55681
+                            }
+                        }
+                        
+                        if(acc.PersonMailingStreet!= null && acc.PersonMailingCity !=null && acc.PersonMailingCountryCode !=null && acc.PersonMailingPostalCode !=null ){
+                            acc.Privat_Address_Start_Date__c = addressStartDate;
+                           if(acc.Last_Modified_System__c!=null){
+                              acc.Source_of_Private_Address__c = acc.Last_Modified_System__c; //WHCRM-55681
+              }
+                        }
+          }//WHCRM-54136: end
+                    else{
+                if(acc.PersonOtherAddress!=oldMap.get(acc.Id).PersonOtherAddress || acc.PersonOtherStreet!=oldMap.get(acc.Id).PersonOtherStreet || acc.PersonOtherCity!=oldMap.get(acc.Id).PersonOtherCity || acc.PersonOtherCountry!=oldMap.get(acc.Id).PersonOtherCountry || acc.PersonOtherPostalCode!=oldMap.get(acc.Id).PersonOtherPostalCode || acc.PersonOtherState!=oldMap.get(acc.Id).PersonOtherState || acc.PersonOtherLongitude!=oldMap.get(acc.Id).PersonOtherLongitude || acc.PersonOtherLatitude!=oldMap.get(acc.Id).PersonOtherLatitude){
+                    acc.Work_Address_Start_Date__c = addressStartDate;
+                    acc.Work_Address_Undeliverable__c = false;
+                    if(acc.Last_Modified_System__c!=null){
+                        acc.Source_of_Work_Address__c = acc.Last_Modified_System__c;
+                    }
+                }
+                //WHCRM-51065
+                if(acc.PersonOtherStreet == null && acc.PersonOtherCity == null && acc.PersonOtherCountryCode == null && acc.PersonOtherPostalCode == null && acc.PersonOtherState == null && acc.PersonOtherLongitude == null && acc.PersonOtherLatitude == null){
+                    acc.Work_Address_Start_Date__c = null;
+                    acc.Source_of_Work_Address__c = null;
+                }//WHCRM-51065
+
+                if(acc.PersonMailingAddress!=oldMap.get(acc.Id).PersonMailingAddress || acc.PersonMailingStreet!=oldMap.get(acc.Id).PersonMailingStreet || acc.PersonMailingCity!=oldMap.get(acc.Id).PersonMailingCity || acc.PersonMailingCountry!=oldMap.get(acc.Id).PersonMailingCountry || acc.PersonMailingPostalCode!=oldMap.get(acc.Id).PersonMailingPostalCode || acc.PersonMailingState!=oldMap.get(acc.Id).PersonMailingState || acc.PersonMailingLongitude!=oldMap.get(acc.Id).PersonMailingLongitude || acc.PersonMailingLatitude!=oldMap.get(acc.Id).PersonMailingLatitude){
+                    acc.Privat_Address_Start_Date__c = addressStartDate;
+                    acc.Private_Address_Undeliverable__c = false;
+                    if(acc.Last_Modified_System__c!=null){
+                        acc.Source_of_Private_Address__c = acc.Last_Modified_System__c;
+                    }
+                }
+                        //WHCRM-51065
+                        if(String.isBlank(acc.PersonMailingStreet) && String.isBlank(acc.PersonMailingCity) && String.isBlank(acc.PersonMailingCountryCode) && String.isBlank(acc.PersonMailingPostalCode) && String.isBlank(acc.PersonMailingState) && acc.PersonMailingLongitude == null && acc.PersonMailingLatitude == null ){
+                            acc.Privat_Address_Start_Date__c = null;
+                            acc.Source_of_Private_Address__c = null;
+                        }//WHCRM-51065
+            }
+        }
+     }
+     
+  
+  }
+   
+    //WHCRM-47299
+    public void publishOKUPEafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        
+        List<Account> accList = new List<Account>();        
+        for (Account acc : newList){
+      if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c){
+        accList.add(acc);
+      }
+        }
+        if (!accList.isEmpty() && accList.size() > 0){               
+            PublishVehicleOKURelation oOKUPeHandler = new PublishVehicleOKURelation();
+            AssetTriggerHandler ath = new AssetTriggerHandler();
+            list<OKUWrapper> lstOKUWrapper = new List<OKUWrapper>();
+            //WHCRM-68865: Added Order_Country__c
+            List<Asset> assets = new List<Asset>([SELECT Id, Keeper__c, User__c, Owner__c, Keeper_Start_Date__c, Owner_Start_Date__c, User_Start_Date__c, Keeper_End_Date__c, Owner_End_Date__c,
+                                                  Keeper__r.GCID__c, User__r.GCID__c, Owner__r.GCID__c, User_End_Date__c, User_Source_System__c,Source_System__c,Keeper_Source_System__c, VIN_Long__c,
+                                                  Keeper_Change_Date__c, Owner_Change_Date__c, User_Change_Date__c, Keeper__r.TopDrive_Business_ID__c, User__r.TopDrive_Business_ID__c, Owner__r.TopDrive_Business_ID__c,
+                                                  Name,BMW_Unit__c,LastModifiedBy.Alias,LastModifiedDate, Keeper_Business_System_Source__c, Keeper_Last_Modified_Date__c, User_Business_System_Source__c,
+                                                  User_Last_Modified_Date__c, Owner_Business_System_Source__c, Owner_Last_Modified_Date__c, DOR_Customer_Info__c, License_Number__c, Vehicle_Status__c,
+                                                  Re_Registration_Date__c, Ordering_Dealer__c, Delivery_Dealer__c, BPS_Flag__c, Corporate_Customer_Number__c, Orderer_Domestic__c, Delivery_Dealer_Used_Cars__c,
+                                                  First_Registration_Date__c, Owner_Technical_System_Source__c, Keeper_Technical_System_Source__c,User_Technical_System_Source__c, Order_Country__c   // Added User_Technical_System_Source__c for INC000035388497
+                                                  FROM Asset WHERE Keeper__r.id IN: accList OR User__r.id IN: accList OR Owner__r.id IN: accList]);
+            
+            for (Asset oAsset : assets){
+                if (oAsset.Keeper__c != null){
+                    lstOKUWrapper.add(new OKUWrapper(oAsset,null,oAsset.Keeper__r.TopDrive_Business_ID__c,oAsset.Keeper__r.GCID__c,'update',Constants.sKeeper,oAsset.Keeper_Start_Date__c,oAsset.Keeper_End_Date__c,oAsset.Keeper_Source_System__c,oAsset.Keeper_Change_Date__c));
+                }
+                if (oAsset.User__c != null){
+                    lstOKUWrapper.add(new OKUWrapper(oAsset,null,oAsset.User__r.TopDrive_Business_ID__c,oAsset.User__r.GCID__c,'update',Constants.sUser,oAsset.User_Start_Date__c,oAsset.User_End_Date__c,oAsset.User_Source_System__c,oAsset.User_Change_Date__c));
+                }
+                if (oAsset.Owner__c != null){
+                    lstOKUWrapper.add(new OKUWrapper(oAsset,null,oAsset.Owner__r.TopDrive_Business_ID__c,oAsset.Owner__r.GCID__c,'update',Constants.sOwner,oAsset.Owner_Start_Date__c,oAsset.Owner_End_Date__c,oAsset.Source_System__c,oAsset.Owner_Change_Date__c));
+                }            
+            }
+            if(!lstOKUWrapper.isEmpty()){
+                try
+                {
+                    //Call method to publish events
+                    oOKUPeHandler.createPlatformEventOnOKUUpdate(lstOKUWrapper);
+                }
+                catch(Exception e){
+                    sendErrorsAsPlatformEvent(lstOKUWrapper,'update',e);
+                }
+            }
+    }
+    }
+  @TestVisible
+    private static void sendErrorsAsPlatformEvent(List<OKUWrapper> lstOKUWrapper,String operation, Exception excep){
+        system.debug('## OKU Platform Event'+lstOKUWrapper);
+        List<PEpublishError__e> lstErrorEvent = new List<PEpublishError__e>();
+        PublishErrorPlatformEventHandler oErrorHandler = new PublishErrorPlatformEventHandler();
+        PEpublishError__e oErrorEvent = new PEpublishError__e();
+        List<Id> lstAssetId = new List<Id>();
+        for(OKUWrapper oOKU: lstOKUWrapper){
+            if(oOKU.oAsset != null)
+            {
+            lstAssetId.add(oOKU.oAsset.Id);
+            }
+        }
+        oErrorEvent.Error_Details__c = 'Error while' + operation + 'of the outbound OKU platform events for IDs:  ' + lstAssetId + '';
+        oErrorEvent.Component_Code__c = Constants.componentCode_OKU;
+        oErrorEvent.System_Code__c = Constants.systemCode_Salesforce;
+        oErrorEvent.Error_Date__c = System.now();
+        oErrorEvent.Error_Type__c = Constants.errorType_Technical;
+        oErrorEvent.Error_Trace__c = excep.getStackTraceString();
+        lstErrorEvent.add(oErrorEvent);
+        oErrorHandler.sendErrorList(lstErrorEvent);               
+    }
+
+    //WHCRM-47300
+    public void publishC2DafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        PublishAccountDealerRelEventHandler adrEventHandler = new PublishAccountDealerRelEventHandler();
+    List<Account> accList = new List<Account>();        
+        
+        for (Account acc : newList){
+      if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c){
+        accList.add(acc);
+      }
+        }
+        List<Account_Dealer_Relation__c> lstAccountDealerRel=[SELECT Id,Related_Account__r.GCID__c,Related_Account__r.TopDrive_Business_ID__c, LastModifiedDate, 
+                                                              Brand__c,Dealer_Outlet__c,Dealer_Outlet__r.Buno__c,End_Date__c,/* */
+                                                              Relationship_Type__c,Source__c,Start_Date__c, SA_Retail_Dealer_Number__c, LastModifiedBy.Alias,CreatedDate,
+                                                              Related_Account__r.UCID__c, Related_Account__r.BMW_Unit__c, Last_Modified_Date__c, Business_System_Source__c,
+                                                              Technical_System_Source__c FROM Account_Dealer_Relation__c WHERE Related_Account__c IN:accList];        
+     
+        if (!lstAccountDealerRel.isEmpty() && lstAccountDealerRel.size() > 0){
+      adrEventHandler.createAccountDealerRelOnUpdate(lstAccountDealerRel);
+        }  
+    }
+    public void publishC2CPEafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        
+        List<Account> accList = new List<Account>();        
+        for (Account acc : newList){
+            if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c){
+                accList.add(acc);
+            }
+        }
+        if (!accList.isEmpty() && accList.size() > 0){               
+            PublishCustomerCustomerRelEventHandler c2cPeHandler = new PublishCustomerCustomerRelEventHandler();
+            List<Account_Account_Relation__c> listOfc2cs = new List<Account_Account_Relation__c>([SELECT Name, End_Date__c, ExternalSystem__c, ExternalSystemId__c, LastModifiedById, CreatedById, Parent_Account__c, Related_Account__c,
+                                                                                                  Relationship_Type__c, Retention_Calculation_required__c, Retention_Date__c, Source__c, Start_Date__c,Unique_C2C_identifier__c FROM Account_Account_Relation__c WHERE Parent_Account__c IN: accList]);
+            if(!listOfc2cs.isEmpty()){
+                //Call method to publish events
+                c2cPeHandler.createAccToAccRelPEOnUpdate(listOfc2cs);                
+            }
+        }
+    }
+    
+    // WHCRM-48269
+    public void publishOpportunityPEafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        
+        Set<Id> accIdSet = new Set<Id>();        
+        for (Account acc : newList){
+            if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c){
+                accIdSet.add(acc.Id);
+            }
+        }
+        System.debug('accIdSet----'+accIdSet);
+        if (!accIdSet.isEmpty()){   
+            
+            Map<Id,Request__c> idVsRequestMap = new Map<Id,Request__c>([Select Id,Name From Request__c Where Account__c IN: accIdSet]);
+            System.debug('idVsRequestMap----'+idVsRequestMap);
+            if(!idVsRequestMap.isEmpty()){
+                PublishRequestEventHandler.updatePlatformEvenetOnRequest(idVsRequestMap.Keyset(), 'update');
+
+            }
+
+        }
+    } 
+
+    // WHCRM-48269 changes end here
+    
+    /*Merged with updateRelatedParticipationsafterGCIDUpdate() - WHCRM-57100  
+     // WHCRM-48272
+    public void updateParticipationafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        
+        Set<Id> accIdSet = new Set<Id>();        
+        for (Account acc : newList){
+            if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c){
+                accIdSet.add(acc.Id);
+            }
+        }
+        System.debug('accIdSet----'+accIdSet);
+        if (!accIdSet.isEmpty()){   
+            
+            List<Participation__c> listParticipation = new List<Participation__c>([Select Id,Name,Date_of_Last_Business_Modification__c From Participation__c Where Account__c IN: accIdSet]);
+            System.debug('listParticipation----'+listParticipation);
+            if(!listParticipation.isEmpty()){
+                participationHelper.setDtofLastBusiModiAccGCIDUpd(listParticipation);
+            }
+
+        }
+    }*/ 
+    
+    /*START : WHCRM-57100*/
+    public void updateRelatedParticipationsafterGCIDUpdate(List<Account> newList,List<Account> oldList,Map<Id,Account> newMap,Map<Id,Account> oldMap){
+        
+        Set<Id> setAcctIDS = new Set<Id>();
+        List<Account> lstAccounts = new List<Account>();
+        for (Account acc : newList){
+            if (acc.GCID__c != null && acc.GCID__c != oldMap.get(acc.Id).GCID__c)
+                setAcctIDS.add(acc.ID);
+    } 
+        if(!setAcctIDS.isEmpty()){
+            for(Account acct : [SELECT ID,GCID__c,(Select Id,Account__c,GCID__c from Participations__r) FROM Account where ID =: setAcctIDS])
+                lstAccounts.add(acct);
+            System.debug('Apple1:'+lstAccounts);
+            if(!lstAccounts.isEMpty())
+                //set DtofLastBusiModi of updateParticipationafterGCIDUpdate () being done by this itself.
+                participationHelper.setGCIDOnAccGCIDUpdate(lstAccounts);
+        }
+    }
+    /*END : WHCRM-57100*/
+     
+     //Start: WHCRM-73629 Commented to improve code coverage, method used is setAddressStartDate
+     //Start : WHCRM-49110
+     /*public void updateAddressStartDatesOnInsert(List<Account> newList){
+        String source = UserInfo.getName() == 'GDPR Job' ? 'GDPR Job' : 'Salesforce';
+        system.debug('source-->'+source);
+        Map<String,String> mapStreetHouseNumber = null;
+        for(Account newAct: newList){
+            if(newAct.IsPersonAccount){
+                system.debug('IsPersonAccount, PersonOtherAddress-->'+newAct.PersonOtherAddress);
+                system.debug('IsPersonAccount, PersonMailingAddress-->'+newAct.PersonMailingAddress);
+                system.debug('IsPersonAccount, PersonOtherStreet-->'+newAct.PersonOtherStreet);
+                system.debug('IsPersonAccount, PersonMailingStreet-->'+newAct.PersonMailingStreet);
+                if(null != newAct.PersonOtherStreet){
+                    system.debug('## updateAddressStartDates: As expected 3');
+                    newAct.Work_Address_Start_Date__c = System.today();
+                }
+                if(null != newAct.PersonMailingStreet){
+                    system.debug('## updateAddressStartDates: As expected 4');
+                    newAct.Privat_Address_Start_Date__c = System.today();
+                }
+            }
+            if(newAct.BMW_Unit__c == 'US-NSC' && newAct.Customer_Status__c == null)
+              newAct.Customer_Status__c = 'Active';
+        }
+    }*/
+    //End : WHCRM-49110
+    //Start: WHCRM-73629 Commented to improve code coverage, method used is setAddressStartDate
+
+    //Start: WHCRM-52041
+    public void setCustomerStatusForUSMarket(List<Account> newList){
+        for(Account newAct: newList){
+            if(newAct.BMW_Unit__c == 'US-NSC' && newAct.Customer_Status__c == null)
+              newAct.Customer_Status__c = 'Active';
+        }
+    }
+  //End: WHCRM-52041
+    //WHCRM-22560 Read-only access to fields provided by NKAM in order to avoid data inconsistency
+    Public void NKAMReadOnlyFields(List<Account> newList, Map<Id,Account> oldMap ){
+        for(Account Acc:newList){
+            Account oldAcc = new Account();
+            oldAcc = oldMap.get(Acc.Id);
+            if(Acc.BMW_Unit__c ==Constants.bmwUnit_BENSC && oldAcc.Corporate_Customer_Number__c != null && 
+               (Acc.Business_System_Source__c =='NKAM' || Acc.Technical_System_Source__c=='NKAM') &&
+              (oldAcc.Corporate_Customer_Number__c != Acc.Corporate_Customer_Number__c || oldAcc.ParentId != Acc.ParentId ||
+              oldAcc.Customer_Status__c != Acc.Customer_Status__c || oldAcc.End_Date_Fleet_Customer__c != Acc.End_Date_Fleet_Customer__c ||
+              oldAcc.Name != Acc.Name || oldAcc.VAT_No__c != Acc.VAT_No__c || oldAcc.Business_mobile_phone__c != Acc.Business_mobile_phone__c ||
+              oldAcc.Website !=Acc.Website || oldAcc.Billing_House_Number__c != Acc.Billing_House_Number__c || oldAcc.Billing_Street_Name__c != Acc.Billing_Street_Name__c ||
+              oldAcc.BillingCity != Acc.BillingCity || oldAcc.BillingState != Acc.BillingState || oldAcc.BillingPostalCode != Acc.BillingPostalCode ||
+              oldAcc.Additional_Post_Box__c != Acc.Additional_Post_Box__c || oldAcc.BillingCountry != Acc.BillingCountry ||
+               oldAcc.Customer_Type__c != Acc.Customer_Type__c || oldAcc.Industry != Acc.Industry || oldAcc.AnnualRevenue != Acc.AnnualRevenue ||oldAcc.Company_Fleet_Size__c != Acc.Company_Fleet_Size__c)){
+                   Acc.addError(Label.NKAM_Error_Message);
+               }
+}
+    }//WHCRM-22560 end here
+    
+    //WHCRM-51051
+    public  void shareAccountsWithMultipleMarkets(Map<Id,Account> newMap , Map<Id,Account> oldMap)
+    {
+        Map<String, Id> grIdMap = new Map<String, Id>();
+        List<AccountShare> accShareList = new List<AccountShare>();
+        for(Group gr : [Select Id, developerName from Group]){
+            grIdMap.put(gr.developerName, gr.Id);
+        }
+
+        Map<id,Set<String>> marketToDeleteMap = new Map<id,Set<String>>(); //WHCRM-54008
+
+        for(Account acc:newMap.values()){
+            
+            if(acc.Markets_Involved__c!=null && (oldMap==null || oldMap.get(acc.Id).Markets_Involved__c!=acc.Markets_Involved__c)){
+                List<String> newMarketInvolvedList = acc.Markets_Involved__c.split(';'); //WHCRM-54008
+                for(String market : newMarketInvolvedList){  //WHCRM-54008 
+                    if(market!=acc.BMW_Unit__c && grIdMap.containsKey(market.replace('-', '_')) ){
+                        AccountShare accountShr = new AccountShare();
+                        accountShr.AccountId = acc.Id;
+                        accountShr.AccountAccessLevel = 'Edit'; //WHCRM-54008 
+                        accountShr.OpportunityAccessLevel = 'None';
+                        accountShr.CaseAccessLevel = 'None';
+                        accountShr.UserOrGroupId = grIdMap.get(market.replace('-', '_'));
+                        accShareList.add(accountShr);
+
+                        //WHCRM-54008 
+                        if(oldMap != null && oldMap.get(acc.Id).Markets_Involved__c != null){
+                            for(String marketOld :oldMap.get(acc.Id).Markets_Involved__c.split(';')){
+                                if(market!=acc.BMW_Unit__c && market != marketOld && !newMarketInvolvedList.contains(marketOld)){
+                                    checkAndAddAccountShareRecordToDelete(marketToDeleteMap,grIdMap,acc,marketOld);
+                                }
+                            }
+                        }//WHCRM-54008 changes end here
+
+                    } 
+                } 
+            
+            } 
+            //WHCRM-54008
+            else if (acc.Markets_Involved__c == null && oldMap != null && oldMap.get(acc.Id).Markets_Involved__c != null) {
+                for(String marketOld :oldMap.get(acc.Id).Markets_Involved__c.split(';')){
+                    if(marketOld!=acc.BMW_Unit__c && grIdMap.containsKey(marketOld.replace('-', '_'))){
+                        checkAndAddAccountShareRecordToDelete(marketToDeleteMap,grIdMap,acc,marketOld);
+                    }
+                }
+            } //WHCRM-54008 changes end here
+        }
+
+        if(!accShareList.isEmpty()){
+             Database.SaveResult[] lsr = Database.insert(accShareList,false);
+        
+            Integer i=0;
+            for(Database.SaveResult sr : lsr){
+                
+                if(!sr.isSuccess()){
+                    Database.Error err = sr.getErrors()[0];
+                    if(!(err.getStatusCode() == StatusCode.FIELD_FILTER_VALIDATION_EXCEPTION  &&  err.getMessage().contains('AccessLevel'))){
+                        // Throw an error when the error is not related to trivial access level.
+                        newMap.get(accShareList[i].AccountId).addError('Unable to grant sharing access due to following exception: '+ err.getMessage());
+                    }
+                }
+                i++;
+            }     
+        }   
+        
+        //WHCRM-54008
+        if(!marketToDeleteMap.isEmpty()){
+            Set<String> uniqueIdentifierForAccountAndUserId = new Set<String>();
+            Set<String> allMarketsSet = new Set<String>();
+            for(Id deleteShare : marketToDeleteMap.keySet()){
+                for(String UserOrGroupIdStr :marketToDeleteMap.get(deleteShare)){
+                    uniqueIdentifierForAccountAndUserId.add(deleteShare+UserOrGroupIdStr);
+                }
+                allMarketsSet.addAll(marketToDeleteMap.get(deleteShare));
+            }
+
+            List<AccountShare> accShareListToDelete = new List<AccountShare>();
+            for(AccountShare  accShare :[Select Id, AccountId,UserOrGroup.Name,UserOrGroupId From AccountShare Where AccountId IN : marketToDeleteMap.keySet() AND UserOrGroupId IN: allMarketsSet]){
+                if(uniqueIdentifierForAccountAndUserId.contains(accShare.AccountId+string.valueof(accShare.UserOrGroupId))){
+                    accShareListToDelete.add(accShare);
+                }
+            }
+
+            if(!accShareListToDelete.isEmpty()){
+                Delete accShareListToDelete;
+            }
+        } //WHCRM-54008 changes end here
+    }
+
+    //WHCRM-54008
+    public static void checkAndAddAccountShareRecordToDelete(Map<id,Set<String>> marketToDeleteMap,Map<String, Id> grIdMap, Account acc, String marketOld){
+        if(!marketToDeleteMap.containsKey(acc.Id)){
+            marketToDeleteMap.put(acc.Id, new Set<String>());
+        }
+        marketToDeleteMap.get(acc.Id).add(grIdMap.get(marketOld.replace('-', '_')));
+    } //WHCRM-54008 changes end here
+  /* Created by Pavan as part of WHCRM-65569- START */
+    public void setMysteryFlagForDynatrace (List<Account> accList){
+         for(Account acc : accList) {
+             if(acc.BMW_Unit__c != null && acc.BMW_Unit__c.substringAfter('-') == 'NSC'){
+    
+           if(acc.FirstName == system.Label.Dynatrace_First_Name && (acc.LastName == system.Label.Dynatrace_Last_Name1 || acc.LastName == system.Label.Dynatrace_Last_Name2)&& acc.PersonEmail == system.Label.Dynatrace_Email ){
+                acc.Mysterylead_Flag__c = true;  
+           }
+         }
+    }
+        }
+    /* Created by Pavan as part of WHCRM-65569- END */
+}
