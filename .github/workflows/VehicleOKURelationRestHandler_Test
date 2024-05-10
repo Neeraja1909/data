@@ -1,0 +1,435 @@
+@isTest
+public class VehicleOKURelationRestHandler_Test {
+    
+    private static final Id RECTYPE = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Person Account').getRecordTypeId();
+    
+     @TestSetup static void setupData() {
+         
+        Asset oAsset1 = new Asset(Name = 'Asset1Test',Brand__c = 'BMW',ModelDescription__c = 'Test1',VIN_Long__c = 'WBATest1');
+        insert oAsset1;
+         Asset oAsset2 = new Asset(Name = 'Asset2Test',Brand__c = 'BMW',ModelDescription__c = 'Test2',VIN_Long__c = 'D');
+        insert oAsset2;
+    	list<Vehicle_Mapping__c> lstVM = new list<Vehicle_Mapping__c>();
+        lstVM.add(new Vehicle_Mapping__c(name='bodyGrouptesttest',Salesforce_Field_Name__c='Body_Group__c'));
+        lstVM.add(new Vehicle_Mapping__c(name='bodyGrouptest',Salesforce_Field_Name__c='Body_Group__c'));
+        lstVM.add(new Vehicle_Mapping__c(name='bodyTypetest',Salesforce_Field_Name__c='Body_Type__c'));
+        lstVM.add(new Vehicle_Mapping__c(name='brandtest',Salesforce_Field_Name__c='Brand__c'));
+        lstVM.add(new Vehicle_Mapping__c(name='VINtest',Salesforce_Field_Name__c='VIN_Long__c'));
+         insert lstVM;
+         
+        List<Account> oAcc = TestDataFactory.createAccount(1,false,RECTYPE);
+        oAcc[0].GCID__c = 'TestGCID123456';
+         //WHCRM-77624_START
+        oAcc[0].PersonMailingCountry = 'Germany';
+        oAcc[0].PersonMailingCity = 'Munich';
+        oAcc[0].PersonMailingStreet = 'Herzogstraße 8';
+        oAcc[0].PersonMailingState = 'Baden-Württemberg';
+        //WHCRM-77624_END
+        insert oAcc;
+         
+     }
+    
+    @isTest
+    Static Void wrongDataCallout_Test(){
+        
+        // Calling the inbound mechanism.
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{"agentAlias" : "test"}]';
+        req.requestBody = Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        system.assert(lstResponse[0].status == '400');
+    }
+    
+    @isTest
+    Static Void historizeAsset_Test(){
+        VehicleOKURelationRestHandler.historizeAsset('testrealtion',null,Date.today(),Date.today(),'testSource',null,'testlicense','teststatus','testving',null,date.today(),'BE-NSC');
+    }
+    
+    @isTest static void nullRequestTest(){
+        //mb-Cognizant-2022-01-07-WHCRM-58732 -- test if the request is null
+        // Calling the inbound mechanism.
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        system.assert(lstResponse[0].status == '400');
+    }
+    @isTest static void throwExceptionTest(){
+        //mb-Cognizant-2022-01-07-WHCRM-58732 -- throw exception test
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{"agentAlias" : "test", "businessSystemSource": "caRMen", "endDate":"notADate", "GCID":"ABC123xyz"}]';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        // check if the exception is thrown
+        system.assert(lstResponse[0].status == '500');
+    }
+//WHCRM-74380 test methods added
+ @isTest static void vehicleOKUwithEndDateTest(){
+        //mb-Cognizant-2022-01-07-WHCRM-58732 -- throw exception test
+        
+        Test.setMock(HttpCalloutMock.class, new MuleServiceCallOutMock());
+            MuleIntegration oMuleInt1 = new MuleIntegration();
+            oMuleInt1.getVehicleInformationvf('D');
+        	
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+     
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{"businessSystemSource":"IL-SYS-SFDC","integrationCorrelationId":"M075C08xlsx2807","lastModifiedDate":"2022-07-28T13:07:25Z","operation":"DELETE","reRegistrationDate":"2022-05-30","relationType":"OWNER","sourceSystem":"FEBIAC","endDate":"2022-06-30","technicalSystemSource":"FEBIAC","VINLong":"WBATest1","firstRegistrationDate":"2021-07-30","vehicleStatus":"Used Car"},{"businessSystemSource":"IL-SYS-SFDC","integrationCorrelationId":"M075C08xlsx2807","lastModifiedDate":"2022-07-28T13:07:25Z","operation":"DELETE","relationType":"OWNER","sourceSystem":"FEBIAC","endDate":"2022-06-30","technicalSystemSource":"FEBIAC","VINLong":"WBATest1","firstRegistrationDate":"2021-07-30","vehicleStatus":"New Car"}]';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        // check if the exception is thrown
+        system.assert(lstResponse[0].status == '200');
+    }
+     @isTest static void vehicleOKUwithoutEndDateTest(){
+        //mb-Cognizant-2022-01-07-WHCRM-58732 -- throw exception test
+       
+        Test.setMock(HttpCalloutMock.class, new MuleServiceCallOutMock());
+            MuleIntegration oMuleInt1 = new MuleIntegration();
+            oMuleInt1.getVehicleInformationvf('D');
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+     
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{"businessSystemSource":"IL-SYS-SFDC","integrationCorrelationId":"M075C08xlsx2807","lastModifiedDate":"2022-07-28T13:07:25Z","operation":"DELETE","reRegistrationDate":"2022-05-30","relationType":"OWNER","sourceSystem":"FEBIAC","endDate":null,"technicalSystemSource":"FEBIAC","VINLong":"WBATest1","firstRegistrationDate":"2021-07-30","vehicleStatus":"Used Car"},{"businessSystemSource":"IL-SYS-SFDC","integrationCorrelationId":"M075C08xlsx2807","lastModifiedDate":"2022-07-28T13:07:25Z","operation":"DELETE","relationType":"OWNER","sourceSystem":"FEBIAC","endDate":"2022-06-30","technicalSystemSource":"FEBIAC","VINLong":"WBATest1","firstRegistrationDate":"2021-07-30","vehicleStatus":"New Car"}]';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        system.assert(lstResponse[0].status == '200');
+    }//WHCRM-74380 end
+    
+       //Start: WHCRM-76931
+       @isTest static void vehicleOKUTerminateCATest(){
+           
+        User user = TestDataFactory.createUser(false);
+        List<Profile> profiles = [SELECT ID From Profile Where Name='BMW Admin' LIMIT 1];
+        user.ProfileID = profiles[0].Id;
+        user.BMW_Unit__c = 'CA-NSC';
+        Insert user;
+        
+        List<PermissionSetAssignment> permissionSetList = new List<PermissionSetAssignment>();
+        for(PermissionSet permissionSet : [SELECT Id from PermissionSet WHERE Name =: 'Integration_Permission']){
+                 PermissionSetAssignment permissionSetAssign = new PermissionSetAssignment(AssigneeId = user.Id, PermissionSetId = permissionSet.Id);
+                  permissionSetList.add(permissionSetAssign);
+          }
+        insert permissionSetList;
+
+        System.runAs(user){
+        List<Account> lstAccount = new List<Account> ();
+        Account ac1 = new Account();
+        ac1.FirstName = 'Test';
+        ac1.LastName = 'Acc';
+        ac1.PersonEmail = 'TestIP@gmail.com';
+        ac1.GCID__c = 'ABC123GCID';
+        ac1.BMW_Unit__c = 'US-NSC';
+        lstAccount.add(ac1);
+        Account ac2 = new Account();
+        ac2.FirstName = 'Test';
+        ac2.LastName = 'Acc';
+        ac2.BMW_Unit__c = 'US-NSC';
+        ac2.PersonEmail = 'TestIP2@gmail.com';
+        ac2.GCID__c = 'ABC123GCIDKeeper';
+        lstAccount.add(ac2);
+         
+        insert lstAccount;
+        Asset oAsset3 = new Asset(Name = 'Asset2Test',Brand__c = 'BMW',ModelDescription__c = 'Test2',VIN_Long__c = 'WBAAD123',Vehicle_Status__c = 'New Car',
+                                  User__c= ac1.id,Keeper__c = ac2.id,Keeper_Start_Date__c = date.today(),User_Start_Date__c = date.today());
+        insert oAsset3;
+            
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{ "businessSystemSource": "DATAHUB", "sourceSystem": "DATAHUB",';
+           bodyValue += '"operation": "UPDATE", "relationType": "User","VINLong": "WBAAD123","GCID":"ABC123GCID"}]';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        system.assert(lstResponse[0].VIN == 'WBAAD123');
+        }
+    }//END: WHCRM-76931
+    
+    //WHCRM-80225
+    @isTest static void vehicleDetailsUpdate_Test(){
+        List<Asset> oAss = new List<Asset>();
+        Account oAcc = [Select id from Account where GCID__c = 'TestGCID123456'];
+        if(oAcc != null){
+           for(Asset oAsset : [Select id,Name,VIN_Long__c,BMW_Unit__c,User__c,User_Start_Date__c From Asset where VIN_Long__c =: 'WBATest1']){
+            oAsset.User__c = oAcc.id;
+            oAsset.User_Start_Date__c = date.today();
+            oAsset.Vehicle_Status__c = 'New Car';
+            oAss.add(oAsset);
+           }
+        }
+        Test.startTest();
+        update oAss;
+        
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI   = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod   = 'POST';//HTTP Request Type
+        String bodyValue = '[{"businessSystemSource":"IL-SYS-SFDC","startDate": "2023-03-02","GCID":"TestGCID123456","integrationCorrelationId":"J075C08xlsx2807","lastModifiedDate":"2022-07-28T13:07:25Z","subVehicleType":"New Car","licenseNumber":"qwerty1234",';
+              bodyValue += '"operation":"UPDATE","reRegistrationDate":"2023-01-12","relationType":"user","sourceSystem":"ESOCRM","endDate":null,"technicalSystemSource":"ESOCRM","VINLong":"WBATest1","firstRegistrationDate":"2021-07-30","vehicleStatus":"Used Car"}]';
+        req.requestBody  =  Blob.valueOf(bodyValue);
+        RestContext.request  = req;
+        RestContext.response = res;
+       
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        //system.assert(lstResponse[0].status == '200','Asset details should be Updated');
+          System.assertEquals(200,res.statuscode);
+
+    }
+    
+    @isTest 
+    static void canadaVehicleCreate_Test(){
+        Profile oProfile = [Select Id from Profile WHERE Name =: Constants.sBMWAdminProfile LIMIT 1];
+        User oUser = TestDataFactory.createUser(False);
+        oUser.BMW_Unit__c = Constants.bmwUnit_CANSC;
+        oUser.ProfileId = oProfile.Id;
+        insert oUser;
+        PermissionSet oPermission = [SELECT Id FROM PermissionSet WHERE Name =: Constants.sIntegration_Cust_Per];
+        insert new PermissionSetAssignment(AssigneeId = oUser.id, PermissionSetId = oPermission.Id);
+		system.runAS(oUser){
+            List<Account> oAccList = TestDataFactory.createAccount(1,false,RECTYPE);
+            Account oAcc = oAccList[0];
+            oAcc.GCID__c = 'TestCAGCID123456';
+            oAcc.BMW_Unit__c = Constants.bmwUnit_CANSC;
+            insert oAcc;
+            List<Asset> oAssetList = TestDataFactory.createAsset(1,false);
+            Asset oAsset = oAssetList[0];
+            oAsset.VIN_Long__c = 'TestCAVINLONG123';
+            oAsset.BMW_Unit__c = Constants.bmwUnit_CANSC;
+            oAsset.Keeper__c = oAcc.id;
+            oAsset.Keeper_Start_Date__c = system.today();
+           	oAsset.User__c = oAcc.id;
+           	oAsset.User_Start_Date__c = system.today();
+            insert oAsset;
+            
+            VehicleOKURelationRestHandler.vehicleOKU customerVehicle = new VehicleOKURelationRestHandler.vehicleOKU();
+            customerVehicle.VINLong = oAsset.VIN_Long__c;
+            customerVehicle.endDate = system.today();
+            customerVehicle.sourceSystem = Constants.sSourceSalesforce;
+                    
+            RestRequest req = new RestRequest();
+            RestResponse res = new RestResponse();
+            req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';
+            req.httpMethod = 'POST';//HTTP Request Type
+            req.requestBody = Blob.valueOf(JSON.serialize(new List<VehicleOKURelationRestHandler.vehicleOKU>{CustomerVehicle}));
+            RestContext.request = req;
+            RestContext.response= res;
+            Test.startTest();
+            VehicleOKURelationRestHandler.vehicleOKUHandler();
+            Test.stopTest();
+            
+            Asset sKeeper = [SELECT Id, Name,Keeper__c,User__c FROM Asset WHERE VIN_Long__c =: 'TestCAVINLONG123'];
+            system.assertEquals(null,sKeeper.Keeper__c);
+            system.assertEquals(null,sKeeper.User__c);
+		}
+    }
+
+    @isTest
+    static void canadaVehicleUpdate_Test() { 
+        Profile oProfile = [Select Id from Profile WHERE Name =: Constants.sBMWAdminProfile LIMIT 1];
+        User oUser = TestDataFactory.createUser(False);
+        oUser.BMW_Unit__c = Constants.bmwUnit_CANSC;
+        oUser.ProfileId = oProfile.Id;
+        insert oUser;
+        PermissionSet oPermission = [SELECT Id FROM PermissionSet WHERE Name =: Constants.sIntegration_Cust_Per];
+        insert new PermissionSetAssignment(AssigneeId = oUser.id, PermissionSetId = oPermission.Id);
+		system.runAS(oUser){
+            List<Account> oAccList = TestDataFactory.createAccount(1,false,RECTYPE);
+            Account oAcc = oAccList[0];
+            oAcc.GCID__c = 'TestCAGCID123456';
+            oAcc.BMW_Unit__c = Constants.bmwUnit_CANSC;
+            insert oAcc;
+            
+            List<Asset> oAssetList = TestDataFactory.createAsset(1,false);
+            Asset oAsset = oAssetList[0];
+            oAsset.VIN_Long__c = 'TestCAVINLONG123';
+            oAsset.BMW_Unit__c = Constants.bmwUnit_CANSC;
+            oAsset.Keeper__c = oAcc.id;
+            oAsset.Keeper_Start_Date__c = system.today()+1;
+            insert oAsset;
+            
+            VehicleOKURelationRestHandler.vehicleOKU customerVehicle = new VehicleOKURelationRestHandler.vehicleOKU();
+            customerVehicle.VINLong = oAsset.VIN_Long__c;
+            customerVehicle.topDriveBusinessID = oAcc.TopDrive_Business_ID__c;
+            customerVehicle.GCID = oAcc.GCID__c; 
+            customerVehicle.relationType = Constants.sKeeper;
+            customerVehicle.startDate = system.today() + 1;
+            customerVehicle.relationChangeDate = system.today();
+            customerVehicle.sourceSystem = Constants.sSourceSalesforce;
+
+            RestRequest req = new RestRequest();
+            RestResponse res = new RestResponse();
+            req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';
+            req.httpMethod = 'POST';//HTTP Request Type
+            req.requestBody = Blob.valueOf(JSON.serialize(new List<VehicleOKURelationRestHandler.vehicleOKU>{CustomerVehicle}));
+            RestContext.request = req;
+            RestContext.response= res;
+            Test.startTest();
+            VehicleOKURelationRestHandler.vehicleOKUHandler();
+            Test.stopTest();
+            
+            Asset sKeeper = [SELECT Id, Name,Keeper__c,Keeper_Start_Date__c FROM Asset WHERE VIN_Long__c =: 'TestCAVINLONG123'];
+            system.assertEquals(customerVehicle.startDate,sKeeper.Keeper_Start_Date__c);
+		}
+    }
+   
+    //WHCRM 88021
+    @isTest
+    static void prepareDataTest() {
+         Boolean gcidFinder1= true;
+         List<String> gcids = new List<String>();
+         User user = TestDataFactory.createUser(true);
+         PermissionSet oPermission = [SELECT Id FROM PermissionSet WHERE Name = 'Integration_Permission'];
+        insert new PermissionSetAssignment(AssigneeId = user.id, PermissionSetId = oPermission.Id);
+        Id accRecTypeId = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Person Account').getRecordTypeId();
+        system.runAS(user){
+            
+            List<Account> accList = TestDataFactory.createAccount(5,true,accRecTypeId);
+            accList[0].Customer_Status__c = 'Active';
+            accList[1].Customer_Status__c = 'Inactive';
+            accList[1].Master_Record__c = accList[4].id;
+            accList[2].Customer_Status__c = 'Deceased';
+            Update accList;
+            Internet_Profile__c Intf1 = new Internet_Profile__c();
+            Intf1.Account__c = accList[2].Id;
+            Intf1.name='test';
+            Intf1.Status__c='Active';
+            Intf1.GCID__c='gcid22222';
+            insert Intf1;
+            
+            List<Asset> oAssetList = TestDataFactory.createAsset(1,false);
+            Asset oAsset = oAssetList[0];
+            oAsset.VIN_Long__c = 'TestCAVINLONG123';
+            oAsset.BMW_Unit__c = Constants.bmwUnit_CANSC;
+            oAsset.Keeper__c = accList[0].id;
+            oAsset.Keeper_Start_Date__c = system.today()+1;
+            insert oAsset;
+            
+            VehicleOKURelationRestHandler.vehicleOKU customerVehicle = new VehicleOKURelationRestHandler.vehicleOKU();
+            customerVehicle.VINLong = oAsset.VIN_Long__c;
+            customerVehicle.topDriveBusinessID = accList[0].TopDrive_Business_ID__c;
+            customerVehicle.GCID = accList[0].GCID__c;
+            customerVehicle.relationType = Constants.sKeeper;
+            customerVehicle.startDate = system.today() + 1;
+            customerVehicle.relationChangeDate = system.today();
+            customerVehicle.sourceSystem = Constants.sSourceSalesforce;
+            
+            RestRequest req = new RestRequest();
+            RestResponse res = new RestResponse();
+            req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';
+            req.httpMethod = 'POST';//HTTP Request Type
+            req.requestBody = Blob.valueOf(JSON.serialize(new List<VehicleOKURelationRestHandler.vehicleOKU>{CustomerVehicle}));
+            RestContext.request = req;
+            RestContext.response= res;
+            
+            List<String> gcidslist = new List<String>();
+            List<Account> cgcids = new List<Account>([SELECT id,GCID__c FROM Account WHERE id IN : accList]);
+            for(Account aGicd: cgcids){
+                gcids.add(aGicd.GCID__c);
+            }
+            gcids.add('ErrorGCID');
+            Test.startTest();
+            List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+            
+            Map<String,String> result = GCIDFinder.getGCIDFromMasterAccountOrIProfile(gcidslist);
+            System.assertEquals('gcid22220', result.get('gcid22220'));//Positive Scenario
+            System.assertnotEquals('gcid22220', result.get('gcid22221'));//negative Scenario
+            Test.stopTest();
+        }
+        
+    }
+    
+    //WHCRM-81048 test methods added
+ 	@isTest static void publishC2VTermination_Test(){
+        User user = TestDataFactory.createUser(false);
+        List<Profile> profiles = [SELECT ID From Profile Where Name='BMW Admin' LIMIT 1];
+        user.ProfileID = profiles[0].Id;
+        user.BMW_Unit__c = 'US-NSC';
+        Insert user;
+        
+        List<PermissionSetAssignment> permissionSetList = new List<PermissionSetAssignment>();
+        for(PermissionSet permissionSet : [SELECT Id from PermissionSet WHERE Name =: 'Integration_Permission']){
+                 PermissionSetAssignment permissionSetAssign = new PermissionSetAssignment(AssigneeId = user.Id, PermissionSetId = permissionSet.Id);
+                  permissionSetList.add(permissionSetAssign);
+          }
+        insert permissionSetList;
+
+        System.runAs(user){
+        List<Account> lstAccount = new List<Account> ();
+        Account ac1 = new Account();
+        ac1.FirstName = 'Test';
+        ac1.LastName = 'Acc';
+        ac1.PersonEmail = 'TestIP@gmail.com';
+        ac1.GCID__c = 'ABC123GCID';
+        ac1.BMW_Unit__c = 'US-NSC';
+        lstAccount.add(ac1);
+        Account ac2 = new Account();
+        ac2.FirstName = 'Test';
+        ac2.LastName = 'Acc';
+        ac2.BMW_Unit__c = 'US-NSC';
+        ac2.PersonEmail = 'TestIP2@gmail.com';
+        ac2.GCID__c = 'ABC123GCIDKeeper';
+        lstAccount.add(ac2);
+         
+        insert lstAccount;
+        Asset oAsset3 = new Asset(Name = 'Asset2Test',Brand__c = 'BMW',ModelDescription__c = 'Test2',VIN_Long__c = 'WBAAD123',Vehicle_Status__c = 'New Car',
+                                  User__c= ac1.id,Keeper__c = ac2.id,Keeper_Start_Date__c = date.today(),User_Start_Date__c = date.today(),
+                                 BMW_Unit__c='US-NSC');
+        insert oAsset3;
+            
+        RestRequest req = new RestRequest();
+        RestResponse res = new RestResponse();
+        req.requestURI = '/services/apexrest/v1/VehicleOKURelationHandler';  //Request URL
+        req.httpMethod = 'POST';//HTTP Request Type
+        String bodyValue = '[{ "businessSystemSource":"IL-SYS-SFDC", "sourceSystem": "DATAHUB","reRegistrationDate":"2022-05-30","endDate":"2022-07-28T13:07:25Z",';
+           bodyValue += '"operation":"DELETE", "relationType": "User","VINLong": "WBAAD123","GCID":"ABC123GCID"}]';
+        req.requestBody =  Blob.valueOf(bodyValue);
+        RestContext.request = req;
+        RestContext.response= res;
+        Test.startTest();
+        List<VehicleOKURelationRestHandler.ResponseWrapper> lstResponse = VehicleOKURelationRestHandler.vehicleOKUHandler();
+        Test.stopTest();
+        List<EventBusSubscriber> eventBusPublish = [SELECT Name, Position, Retries, LastError 
+                                                    FROM EventBusSubscriber 
+                                                    WHERE Type='ApexTrigger'];
+        System.assert(!eventBusPublish.isEmpty(),'Platform Events Published');
+        }
+    }
+}
