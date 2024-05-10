@@ -1,0 +1,350 @@
+public class CaseLanguageDetection implements Queueable
+{
+    Set<Id> listOfCases = new Set<Id>();
+    
+    public caseLanguageDetection(Set<Id> cases)
+    {
+        listOfCases = cases;
+    }
+    
+    public void execute(QueueableContext context) 
+    {
+        identifyLanguage(listOfCases);
+    }
+    
+    @future(callout=true)
+    public static void identifyLanguage(Set<ID> listCases)
+    {
+        //WHCRM-55082
+        List<Case> listCasesEmailCR = new List<Case>();
+        //End - WHCRM-55082
+        
+        List<Case> listOfCases = new List<Case>();
+        listOfCases = [SELECT Id, Description, Subject, Language, Service_Levels__c, OwnerId, Status, CaseNumber, Case_Thread_ID__c, Queue__c,BMW_Unit__c FROM Case WHERE ID IN: listCases]; //WHCRM-55082
+
+        List<Case> lstCase = new List<Case>();
+        
+        AssignmentRule AR = new AssignmentRule();
+        AR = [select id,Name from AssignmentRule where SobjectType = 'Case' and Active = true limit 1];
+        Database.DMLOptions dmlOpts = new Database.DMLOptions();
+        dmlOpts.assignmentRuleHeader.assignmentRuleId= AR.id;
+
+        system.debug('Before cases :: ' + listOfCases);
+        //WHCRM-78989 Check for Default Language Start
+        Map<String,DefaultLanguage__mdt> defaultLanguageMap = new Map<String,DefaultLanguage__mdt>();
+        List<DefaultLanguage__mdt> defaultLangList = [SELECT Id,MasterLabel,Language_Code__c FROM DefaultLanguage__mdt];
+        for(DefaultLanguage__mdt dl : defaultLangList) {
+            defaultLanguageMap.put(dl.MasterLabel,dl);
+        } //WHCRM-78989 End
+        for(Case oCase : listOfCases)
+        {
+            if(!isFromCR(oCase))
+            {
+            String language = getLanguage(oCase);
+            system.debug(language);
+            switch on language
+            {
+                when 'en'
+                {
+                    oCase.Language = 'en_US';
+                }
+                when 'fr'
+                {
+                    oCase.Language = 'fr';
+                }
+                when 'de'
+                {
+                    oCase.Language = 'de';
+                }
+                when 'nl'
+                {
+                    oCase.Language = 'nl_NL';
+                }
+                when else
+                {
+                    oCase.Language = defaultLanguageMap.containsKey(oCase.BMW_Unit__c) ? defaultLanguageMap.get(oCase.BMW_Unit__c).Language_Code__c : '';  //WHCRM-78989 Check for Default Language
+                }
+            }
+    
+            oCase.setOptions(dmlOpts);
+            lstCase.add(oCase);
+        }
+            else
+            {
+                oCase.Type='Dissatisfaction';
+                oCase.setOptions(dmlOpts);
+                lstCase.add(oCase);
+                //WHCRM-55082
+                listCasesEmailCR.add(oCase);
+                //End - WHCRM-55082
+            }
+        }
+        
+        system.debug('List Cases :: ' + lstCase);
+        if(lstCase.size() > 0)
+        {
+            Database.update(lstCase);
+            Set<Id> setOfCases = new Set<id>();
+            for(Case oCase : listOfCases)
+                setOfCases.add(oCase.Id);
+            List<Case> listNewCases = setSLAForCase(setOfCases);
+            listNewCases = checkCRAdmin(listNewCases);
+
+            CaseTriggerHandler.SKIP_TRIGGER_EXECUTION = true; //WHCRM-53816
+            Database.update(listNewCases);
+            CaseTriggerHandler.SKIP_TRIGGER_EXECUTION = false; //WHCRM-53816
+           //WHCRM-55082
+            sendEmailOfCreate(listCasesEmailCR);
+            //End - WHCRM-55082    
+        }
+    }
+
+    public static String getLanguage(Case newCase)
+    {
+           system.debug('Case :: ' + newCase);
+           String textToSend;
+           HttpRequest req = new HttpRequest();
+           MuleService mService = new MuleService();
+
+           textToSend = newCase.Subject + ' ' + newCase.Description;
+
+           if(textToSend.length() > 1800)
+               textToSend = newCase.Description.substring(0,1800);
+           else
+               textToSend = newCase.Description;
+           String appendedEndPoint = Label.Get_Language_URL+'?id=1&text='+EncodingUtil.urlEncode(textToSend,'UTF-8');
+
+           HTTPResponse response;
+           string sData;
+           system.debug('Language detection appendedEndPoint-'+appendedEndPoint);
+           response = mService.doGet(appendedEndPoint);
+           system.debug('Outside' + response);
+           if(response != null)
+           {
+               system.debug('Inside'+response);
+               if(response.getStatusCode() == 200) // If Success response from Callout then return the response
+               {
+                   sData = response.getBody();
+                   system.debug('Response :: ' + sData);
+                   //V1
+                   //sData = sData.substringAfterLast(':');
+                   //sData = sData.substringAfter('\"');
+                   //sData = sData.substring(0,2);
+
+                   //V2
+                   LanguageDetectionWrapper responseList = (LanguageDetectionWrapper) JSON.deserialize(sData, LanguageDetectionWrapper.class);
+                   system.debug('Language detected :: ' + responseList.language_detection + ' All::' + responseList);
+                   if(responseList != null)
+                       sData = responseList.language_detection;
+                   else
+                       sData = 'Error:'+Label.Language_not_recognized;
+               }
+               else
+               {
+                sData = 'Error:'+Label.Language_not_recognized;
+               }
+           }
+           else 
+           {
+            sData = 'Error:'+Label.Language_not_recognized;
+           } 
+           
+           return(sData);
+       }
+    
+    public static boolean isFromCR(Case oCase)
+    {
+        List<EmailMessage> emailList = [SELECT ID, ToAddress FROM EmailMessage WHERE ParentId =: oCase.Id AND Incoming = True ORDER BY CreatedDate LIMIT 1];
+        if(emailList.size() == 0) 
+            return false;
+        EmailMessage email = emailList.get(0);
+        system.debug('Email :: ' + email);
+         return (email.ToAddress.containsIgnoreCase('customer.relations@bmw.be') || email.ToAddress.containsIgnoreCase('customer.relations@bmw.lu') || email.ToAddress.containsIgnoreCase('-cr-')); //WHCRM-56805 - Specifying exact email for customer.relations
+    }
+    
+    public static List<Case> setSLAForCase(Set<Id> listCases)
+    {                 
+        List<Case> lstCase = [SELECT Id, Description, Subject, Language, Service_Levels__c, OwnerId, Status FROM Case WHERE ID IN: listCases];
+        //Get Queue setup details
+        map<String,Queue_Service_Level__mdt> mapSL = new map<String,Queue_Service_Level__mdt>(CaseUtility.getServiceLevels());
+        
+        //Get Queue details
+        map<Id,Group> mapQueue = new map<Id,Group>([Select Id,Name from Group where type = 'Queue']);
+        system.debug('mapQueue:'+mapQueue);
+        list<Case> lstCasesToBeUpdated = new list<Case>();
+        
+        //Get Business hours
+        BusinessHours stdBusinessHours = [select id from businesshours where isDefault = true];
+        
+        for(Case oCase : lstCase)
+        {
+            //Get Priority hours
+            map<String,Case_Prioritization__c> mapCustsetCasePrio = Case_Prioritization__c.getAll();
+            system.debug('map:'+mapCustsetCasePrio);
+            system.debug('Owner New:'+oCase.OwnerId);
+            
+            //Check Queue name from Custom Setting
+            if(mapQueue.containsKey(oCase.OwnerId))
+            {
+                system.debug('inside mapQueue contains');
+                string sQueueName = mapQueue.get(oCase.OwnerId).Name;
+                if(mapSL.containskey(sQueueName))
+                {
+                    system.debug('inside mapSL');
+                    Queue_Service_Level__mdt oSL = mapSL.get(sQueueName);
+                    oCase.Service_Levels__c = oSL.Service_Level_Billing__c;
+                    oCase.Service_Level_Time__c = oSL.Service_Level_Time__c;
+                    oCase.Complete_Milestone_on_Waiting_Status__c = oSL.Complete_Milestone_on_Waiting_Status__c;
+                    oCase.Queue__c = oSL.MasterLabel;
+                }
+            }
+            
+            if(oCase.Status == 'New' && stdBusinessHours != null)
+            {  
+                if(mapCustsetCasePrio.containskey(oCase.Service_Levels__c))
+                {
+                    oCase.SLA_Start_Date__c = system.now();
+                    if(oCase.SLA_Start_Date__c != null) {
+                        oCase.SLA_Due_Date__c = BusinessHours.addGmt(stdBusinessHours.id, oCase.SLA_Start_Date__c, (12 * 60 * 60 * 1000L));
+                        oCase.SLA_Due1__c = BusinessHours.addGmt(stdBusinessHours.id, oCase.SLA_Due_Date__c, (-(mapCustsetCasePrio.get(oCase.Service_Levels__c).SLA_Due_Hours1__c) * 60 * 60 * 1000L).longValue());
+                        oCase.SLA_Due2__c = BusinessHours.addGmt(stdBusinessHours.id, oCase.SLA_Due_Date__c, (-(mapCustsetCasePrio.get(oCase.Service_Levels__c).SLA_Due_Hours2__c) * 60 * 60 * 1000L).longValue());
+                        oCase.SLA_Due3__c = BusinessHours.addGmt(stdBusinessHours.id, oCase.SLA_Due_Date__c, (-(mapCustsetCasePrio.get(oCase.Service_Levels__c).SLA_Due_Hours3__c) * 60 * 60 * 1000L).longValue());
+                    }
+                }
+            }
+        }
+        return lstCase;
+    }
+
+    public static List<Case> checkCRAdmin(List<Case> lstCase)
+    {                 
+        map<Id,Group> mapQueue = new map<Id,Group>([Select Id,Name from Group where type = 'Queue']);
+        List<Case> finalListCases = new List<Case>();
+        system.debug('Cases From CR :: ' + lstCase);
+        for(Case oCase : lstCase)
+        {
+            if(mapQueue.get(oCase.OwnerId) != null && mapQueue.get(oCase.OwnerId).Name == 'BE 3 CR Admin')
+            {
+                oCase.ParentId = getParentId(oCase);
+        oCase.Retention_Category__c = 'Contractual';
+              oCase.Status = 'Closed';
+                oCase.Queue__c = 'BE 3 CR Admin';
+            }
+            system.debug('Case Status :: ' + oCase.status);
+            finalListCases.add(oCase);
+        }
+        return finalListCases;
+    }
+
+    public static Id getParentId(Case lstCase)
+    {
+        String[] words = lstCase.Subject.split(' |\\[|\\]|\\(|\\)|\\\n|\\.|\\,|\\\'');
+        Set<String> possibleWords = new set<String>();
+        List<Case> caseWithNumber = new List<Case>();
+        List<String> longVin = new list<String>();
+        for(String word : words)
+        {
+            if(word.length() == Constants.intCaseNumberLength)
+            {
+                possibleWords.add(word);
+            }
+        }
+        
+        if(possibleWords != null && !possibleWords.isEmpty() && possibleWords.size() > 0)
+        {
+            caseWithNumber = [SELECT Id FROM Case WHERE CaseNumber IN: possibleWords];
+            if(caseWithNumber.size() == 1)
+                return caseWithNumber[0].Id;
+        }
+        return null;
+    }
+        
+    //WHCRM-55082
+    public static void sendEmailOfCreate(List<Case> listCase)
+    {
+        EmailTemplate et = [SELECT ID, Name, Subject, HTMLValue FROM EmailTemplate WHERE Name = 'Confirmation Dealer New Case' LIMIT 1];
+        system.debug('Email template :: ' + et);
+        List<Messaging.SingleEmailMessage> emailList = new List<Messaging.SingleEmailMessage>();
+        Map<Id, EmailMessage> emailMessageMap = getEmailsFromCase(listCase);
+        List<OrgWideEmailAddress> address = [select Id from OrgWideEmailAddress WHERE Address = 'customer.relations@bmw.be'LIMIT 1];
+        //EmailServicesAddress address = [select Id from EmailServicesAddress WHERE LocalPart = 'customer.relations@bmw.be' OR LocalPart LIKE '%be-cr-%' LIMIT 1][0];
+        for(Case oCase : listCase)
+        {
+            if(!oCase.Subject.containsIgnoreCase('#adminqueueBE3CRAdmin'))
+            {
+                Messaging.SingleEmailMessage semail = new Messaging.SingleEmailMessage();
+                semail.setToAddresses(new String[] {((EmailMessage)emailMessageMap.get(oCase.ID)).FromAddress});
+                if(address.size() > 0)
+                {
+                    semail.setOrgWideEmailAddressId(address.get(0).ID);
+                }
+                semail.setSubject('Bedankt voor uw e-mail / Merci pour votre email');//prepareText(et.Subject, oCase, nameOrg));
+                semail.setHtmlBody(prepareText(et.HTMLValue, oCase));
+                emailList.add(semail);
+                semail.setWhatId(oCase.ID);
+                system.debug('semail:'+semail);
+            } 	
+        }
+        if(emailList.size() > 0)
+        {
+            Messaging.SingleEmailMessage[] emailArray = new Messaging.SingleEmailMessage[emailList.size()];
+            for(Integer i = 0; i < emailList.size(); i++)
+            {
+                emailArray[i] = emailList.get(i);
+            }
+            Messaging.sendEmail(emailArray);
+            
+            //WHCRM-56451
+            List<Task> listTask = new List<Task>();
+            for(Task oTask : [SELECT ID FROM Task WHERE Queue__c LIKE 'BE%' AND Subject = 'Email: Bedankt voor uw e-mail / Merci pour votre email' and Activity_Type__c = 'Email out' AND WhatId IN: listCase])
+            {
+                oTask.BMW_Unit__c = 'BE-NSC';
+                oTask.Activity_Type__c = 'Automatic Email Alert	';
+                listTask.add(oTask);
+            }
+            if(listTask.size() > 0)
+            {
+                update listTask;
+            }
+            // End - WHCRM-56451
+        }
+    }
+
+    public static Map<Id, EmailMessage> getEmailsFromCase(List<Case> listCase)
+    {
+        Set<ID> caseID = new Set<ID>();
+        for(Case oCase : listCase)
+        {
+            caseID.add(oCase.ID);
+        }
+        List<EmailMessage> emailList = [SELECT ID, ToAddress, ParentID, FromAddress FROM EmailMessage WHERE ParentId =: caseID AND Incoming = True ORDER BY CreatedDate LIMIT 1];
+        Map<Id, EmailMessage> mapEmailMessage = new Map<Id, EmailMessage>();
+        for(EmailMessage em : emailList)
+        {
+            mapEmailMessage.put(em.parentID, em);
+        }
+        return mapEmailMessage;
+}
+
+    public static String prepareText(String text, Case oCase)
+    {
+        text = text.replace('{{{Case.CaseNumber}}}', oCase.CaseNumber);
+        text = text.replace('{{{Case.Subject}}}', oCase.Subject);
+        text = text.replace('{{{Case.ThreadID}}}', EmailMessages.getFormattedThreadingToken(oCase.Id));  //WHCRM-79850 Updated the logic to include Lightning Thread Token.
+        return text;
+    }
+    //End - WHCRM-55082
+    
+    //WHCRM-59013
+    public static void putCorrectQueue(List<Case> caseList)
+    {        
+        for(Case oCase : caseList)
+        {
+            if(oCase.BMW_Unit__c.startsWith('BE-') && oCase.Case_Owner__c.containsIgnoreCase('BE Outbound'))
+            {
+                oCase.Queue__c = oCase.Case_Owner__c;
+            }
+        }
+    }
+    //End - WHCRM-59013
+}
