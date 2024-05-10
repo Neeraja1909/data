@@ -1,0 +1,161 @@
+@isTest
+public class AutomaticAccDataDeletionBatch_Test {
+    @testSetup
+    static void setup(){
+        List<DPA_Status_AccDataDeletion__c> lstAccDPA = new List <DPA_Status_AccDataDeletion__c>();
+        DPA_Status_AccDataDeletion__c DPA_Status1 = new DPA_Status_AccDataDeletion__c();
+        DPA_Status1.Name = 'FourPlus';
+        DPA_Status1.DPA_Status__c = '4.5';
+        lstAccDPA.add(DPA_Status1);
+        
+        DPA_Status_AccDataDeletion__c DPA_Status2 = new DPA_Status_AccDataDeletion__c();
+        DPA_Status2.Name = 'Five';
+        DPA_Status2.DPA_Status__c = '5';
+        lstAccDPA.add(DPA_Status2);
+        
+        DPA_Status_AccDataDeletion__c DPA_Status3 = new DPA_Status_AccDataDeletion__c();
+        DPA_Status3.Name = 'FivePlus';
+        DPA_Status3.DPA_Status__c = '5.5';
+        lstAccDPA.add(DPA_Status3);
+        
+        DPA_Status_AccDataDeletion__c DPA_Status4 = new DPA_Status_AccDataDeletion__c();
+        DPA_Status4.Name = 'SixPlus';
+        DPA_Status4.DPA_Status__c = '6.5';
+        lstAccDPA.add(DPA_Status4);
+        
+        insert lstAccDPA;
+        Id accRecTypeId = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Person Account').getRecordTypeId();
+        List<Account> accList = new List<Account>();
+        Account acc1 = new Account();
+        acc1.LastName = 'KeeperAccount';//WHCRM-58713
+        acc1.FirstName = '123Account';//WHCRM-58713
+        acc1.TopDrive_Business_ID__c = 'KeeperTopDrive';
+        acc1.GCID__c = 'KeeperGCId';
+        acc1.DPA_Status__c = '4.5';
+        acc1.BMW_Unit__c	='DE-NSC';
+        acc1.recordtypeid = accRecTypeId;
+        accList.add(acc1);
+        
+        Account acc2 = new Account();
+        acc2.LastName = 'OwnerAccount';//WHCRM-58713
+        acc2.FirstName = '123Account';//WHCRM-58713
+        acc2.TopDrive_Business_ID__c = 'OwnerTopDrive';
+        acc2.GCID__c = 'OwnerGCId';
+        acc2.DPA_Status__c = '5';
+        acc2.BMW_Unit__c    ='DE-NSC';
+        acc2.recordtypeid = accRecTypeId;
+        accList.add(acc2);
+        
+        Account acc3 = new Account();
+        acc3.LastName = 'AddUserAccount';//WHCRM-58713
+        acc3.FirstName = '123Account';//WHCRM-58713
+        acc3.TopDrive_Business_ID__c = 'AddUserTopDrive';
+        acc3.GCID__c = 'AddUserGCId';
+        acc3.DPA_Status__c = '6.5';
+        acc3.BMW_Unit__c    ='BE-NSC';
+        acc3.recordtypeid = accRecTypeId;
+        accList.add(acc3);
+        
+        insert accList; 
+        
+        Asset asst = new Asset(); 
+        asst.Keeper__c = acc1.id;  
+        asst.Owner__c = acc1.id;
+        asst.User__c = acc1.id;
+        asst.Name = 'Asset'+acc1.Name;
+        asst.Brand__c = 'BMW';
+        asst.VIN_Long__c = 'V_'+acc1.Name;
+        asst.ModelDescription__c = 'Model Description' +  acc1.Name;
+        asst.Vehicle_Status__c = 'Used Car';
+        asst.Keeper_Start_Date__c = system.today();
+        asst.Owner_Start_Date__c = system.today();
+        asst.User_Start_Date__c = system.today();
+        
+        insert asst;
+        
+        AssetUserRelation__c aur1 = new AssetUserRelation__c(Account__c = acc1.Id);
+        insert aur1;
+        
+        AssetUserRelation__c aur2 = new AssetUserRelation__c(Account__c = acc3.Id);
+        insert aur2;
+        
+        OKU_History__c okuHistory1 = new OKU_History__c(VIN_Long__c='V_KeeperAccount',Relation_Type__c='Keeper',Account__c = acc1.Id,Asset__c = asst.Id);
+        insert okuHistory1;
+        
+        OKU_History__c okuHistory2 = new OKU_History__c(VIN_Long__c='V_KeeperAccount',Relation_Type__c='Keeper',Account__c = acc3.Id,Asset__c = asst.Id);
+        insert okuHistory2;
+        
+        List<Account_Account_Relation__c> lstAccAccRel = new List <Account_Account_Relation__c>();
+        
+        Account_Account_Relation__c accAccRel1 = new Account_Account_Relation__c();
+        accAccRel1.Parent_Account__c = acc1.id;
+        accAccRel1.Related_Account__c = acc3.Id;
+        accAccRel1.Relationship_Type__c ='Employee';
+        accAccRel1.Start_Date__c = system.today();
+        lstAccAccRel.add(accAccRel1);
+        
+        Account_Account_Relation__c accAccRel2 = new Account_Account_Relation__c();
+        accAccRel2.Parent_Account__c = acc3.id;
+        accAccRel2.Related_Account__c = acc2.Id;
+        accAccRel2.Relationship_Type__c ='Employee';
+        accAccRel2.Start_Date__c = system.today();
+        lstAccAccRel.add(accAccRel2);
+        insert lstAccAccRel;
+        
+        Internet_Profile__c iProfile1 = new Internet_Profile__c(Account__c = acc2.Id);
+        insert iProfile1;
+        Internet_Profile__c iProfile2 = new Internet_Profile__c(Account__c = acc3.Id);
+        insert iProfile2;
+        
+        Case nCase = new Case(AccountId = acc3.Id,Status='New', subject = 'test', Description = 'desc', BMW_Unit__c = 'DE-NSC', Business_Area__c = 'OTHER');
+        insert nCase;
+        
+        DealerOutlet__c dealer1 = new DealerOutlet__c(Name ='test', Buno__c = '1111',BMW_Unit__c = 'DE-NSC');
+        insert dealer1;
+        
+        Account_Dealer_Relation__c accDelRel = new Account_Dealer_Relation__c();
+        accDelRel.Dealer_Outlet__c = dealer1.id;
+        accDelRel.Related_Account__c = acc3.id;
+        accDelRel.Relationship_Type__c = 'Sales Dealer';
+        accDelRel.Brand__c = 'BMW';
+        accDelRel.Start_Date__c = Date.today();
+        
+        insert accDelRel;
+        
+        Opportunity opp = new Opportunity();
+        opp.name = 'test opp';
+        opp.AccountId = acc3.id;
+        opp.CloseDate = system.today();
+        opp.StageName = 'contract';
+        insert opp;
+        
+    }
+    
+    
+    @isTest
+    static void scheduleBatchForSixPlus() {
+        Test.startTest();
+        AutomaticAccDataDeletionBatch batchInstance = new AutomaticAccDataDeletionBatch('SIXPLUS');
+        DateTime dt = DateTime.now().addSeconds(5);
+        String sch = ''+ dt.second() + ' ' + dt.minute() + ' ' + dt.hour() + ' ' +  dt.day() + ' ' + dt.month() + ' ? ' + dt.year();
+        System.schedule('Test'+system.now(), sch, batchInstance);
+        Test.stopTest();
+        
+        list<account> deletedAcc = [Select id,LastName from account where LastName ='KeeperAccount'];//WHCRM-77624
+        system.assertEquals(1, deletedAcc.size());//WHCRM-77624
+         
+    }
+    
+    @isTest
+    static void scheduleBatchForOtherThanSIXPLUS() {
+        Test.startTest();
+        AutomaticAccDataDeletionBatch batchInstance = new AutomaticAccDataDeletionBatch('SIXPLUS1');
+        DateTime dt = DateTime.now().addSeconds(5);
+        String sch = ''+ dt.second() + ' ' + dt.minute() + ' ' + dt.hour() + ' ' +  dt.day() + ' ' + dt.month() + ' ? ' + dt.year();
+        System.schedule('Test'+system.now(), sch, batchInstance);
+        Test.stopTest();
+        list<account> deletedAcc = [Select id,LastName from account where LastName ='KeeperAccount'];//WHCRM-77624
+        system.assertEquals(1, deletedAcc.size());//WHCRM-77624
+        
+    }
+}
