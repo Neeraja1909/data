@@ -1,0 +1,1160 @@
+/*************************************************************************************************************************
+* Name: CaseTriggerHandlerTest
+* Description : Test class for CaseTriggerHandler
+**************************************************************************************************************************
+Version*********Developer Name*********  Date************Description
+1.0      Darshan sharma      04/04/2019    WHCRM-1296 Implementation: SLA based prioritization & routing of Cases for ConnectedDrive (currently "Queueify")/ WHCRM-1395 Pupulate Milestone Start Date on Case
+**************************************************************************************************************************/
+
+@isTest
+public class CaseTriggerHandlerTest implements Messaging.inboundEmailHandler{
+    private static final Id PERSONACCOUNT_RECORDID = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Person Account').getRecordTypeId();
+    private static final Id COPRACCOUNT_RECORDID = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Corporate').getRecordTypeId();    
+    
+    private static final String TITLE = 'Conditional Bundle for Publish API Testing';
+    private static final String CKM_ARTICLE_NUMBER = '000002308';
+    private static final String CKM_ARTICLE_TEXT = 'Article 000002308 body';
+    
+ @TestSetup
+    static void setup()
+    {
+        
+        List<Queue_Setup__c> lstQueues = new List<Queue_Setup__c>();
+        Queue_Setup__c queueSetup = new Queue_Setup__c (Name = 'DE 1 CD KE');
+        Queue_Setup__c queueSetup1 = new Queue_Setup__c(Name ='PT 1 CIC Dados Pessoais');
+        lstQueues.add(queueSetup);
+        lstQueues.add(queueSetup1);
+        insert lstQueues;
+        
+        //Insert Account
+        List<Account> lstAccount = new List<Account>();
+         Account acc1 = TestDataFactory.getAccountObj();
+          acc1.TopDrive_Business_ID__c = 'TDOKUAcc';
+          acc1.BMW_Unit__c = 'DE-NSC';
+          acc1.Corporate_Business_Email__c = 'corporateemailforacc1@test.com';
+          acc1.GCID__c ='GCIDtestacc1822';
+      acc1.recordTypeId= COPRACCOUNT_RECORDID;
+        lstAccount.add(acc1);
+        Account acc2 = TestDataFactory.getAccountObj();
+          acc2.Name ='TestOKU22';
+          acc2.TopDrive_Business_ID__c = 'TDOKUAcc22';
+          acc2.BMW_Unit__c = 'DE-NSC';
+      acc2.recordTypeId= COPRACCOUNT_RECORDID;
+          acc2.Corporate_Business_Email__c = 'corporateemailforacc@test.com';
+        lstAccount.add(acc2);
+        Insert lstAccount;
+        
+        //Insert Asset
+        List<Asset> lstAsset = new List<Asset>();
+        Asset asset = New Asset (Name= 'TestAsset', VIN_Long__c ='WBATR95000NC88556', Brand__c = 'BMW');
+        lstAsset.add(asset);
+        
+        Asset oAssetBMW = New Asset (Name= 'TestAssetBMW', VIN_Long__c ='WBATR95000NC88BMW', Brand__c = 'BMW');
+        lstAsset.add(oAssetBMW);
+        
+        Asset oAssetMINI = New Asset (Name= 'TestAssetMINI', VIN_Long__c ='WBATR95000NC8MINI', Brand__c = 'MINI');
+        lstAsset.add(oAssetMINI);
+        
+        Insert lstAsset;
+        
+        //Insert entitlement
+        Entitlement Ent1= new entitlement(name='Standard Support',accountid=acc1.id, StartDate=Date.valueof(System.now().addDays(-2)), EndDate=Date.valueof(System.now().addYears(2)));
+        insert Ent1;
+        system.debug('entitle'+Ent1);
+        //Associate Entitlement Process to Entitlement record
+        List<SlaProcess> lstEntitlementProcess = [SELECT Id, Name FROM SlaProcess WHERE Name='DE-NSC Enhanced' and IsActive = true LIMIT 1];
+        if (lstEntitlementProcess.size()>0)
+        {
+            Ent1.SlaProcessId = lstEntitlementProcess[0].id;
+            update Ent1;        
+        }
+        system.debug('slaprocess'+lstEntitlementProcess);
+        //Insert Case Keywords configuration
+        List<Case_Keywords_Configuration__c> lstCKC = new List<Case_Keywords_Configuration__c>();
+        
+        Case_Keywords_Configuration__c CaseKeyCon1 = new Case_Keywords_Configuration__c(Name = 'Test High GDPR', Priority__c = 'High',BMW_Unit__c = 'DE-NSC', Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon1);
+        
+        Case_Keywords_Configuration__c CaseKeyCon2 = new Case_Keywords_Configuration__c(Name = 'Test Medium Connected', Priority__c = 'Medium',BMW_Unit__c = 'DE-NSC',Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon2);
+        
+        Case_Keywords_Configuration__c CaseKeyCon3 = new Case_Keywords_Configuration__c(Name = 'Test Low Connected', Priority__c = 'Low',BMW_Unit__c = 'DE-NSC',Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon3);
+        
+        Case_Keywords_Configuration__c CaseKeyCon4 = new Case_Keywords_Configuration__c(Name = 'Test High1 Connected', Priority__c = 'High',BMW_Unit__c = 'DE-NSC',Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon4);
+        
+        Case_Keywords_Configuration__c CaseKeyCon5 = new Case_Keywords_Configuration__c(Name = 'Test Medium1 Connected', Priority__c = 'Medium',BMW_Unit__c = 'DE-NSC',Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon5);
+        
+        Case_Keywords_Configuration__c CaseKeyCon6 = new Case_Keywords_Configuration__c(Name = 'Test Low1 Connected', Priority__c = 'Low',BMW_Unit__c = 'DE-NSC',Queue__c='DE 1 CD KE' );
+        lstCKC.add(CaseKeyCon6);
+        
+        Case_Keywords_Configuration__c CaseKeyCon7 = new Case_Keywords_Configuration__c(Name = 'GDPR', Priority__c = 'Low',BMW_Unit__c = 'PT-NSC', Queue__c='PT 1 CD Advanced' );
+        lstCKC.add(CaseKeyCon7);
+        Insert lstCKC;
+        
+        Group testQueue =[SELECT Id,Name,Type FROM Group WHERE DeveloperName = 'DE_1_CD_KE' AND Type = 'queue' ];
+        
+        // Insert Case
+
+        // Fetch RecordType for PersonAccount:
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        
+        // Creating a Person Account (to be related to Case):
+        Account myTestAccount = new Account(FirstName = 'Robby ', LastName = 'Naish', PersonEmail = 'any@anydomain.com', RecordTypeId = recordTypeId);
+        insert myTestAccount;
+
+        //WHCRM-74015 - Commented Case_Topic_Group__c = 'BMW Assist' (Epic WHCRM-63119)
+        //WHCRM-74015 - Updated Business_Area__c = 'BMW WELT' to Business_Area__c='DIGITAL SERVICES' (Epic WHCRM-63119)
+        List<Case> lstCase = new List<Case>();
+
+        Case oCase1 = new case(subject = 'Test Case1',Description = 'Test High GDPR', Origin = 'Email', Status='In Progress',Case_Transfer_Status__c='Retail',AssetId = asset.Id, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase1);
+        
+        Case oCase2 = new case( subject = 'Test Case2', Description = 'Test Medium Connected',Origin = 'Email', Status='New', OwnerId = testQueue.Id, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase2);
+        
+        Case oCase3 = new case(subject = 'Test Case3 Connected', Description = 'Test Low',Origin = 'Email', Status='In Progress', Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase3);
+        
+        Case oCase4 = new case(subject = 'Test Case4 Connected', Origin = 'Email', Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase4);
+        
+        Case oCase5 = new case(subject = 'Test Case5 Connected', Origin = 'Email',EntitlementID = Ent1.Id,Isstopped = true, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase5);
+        
+        Case oCase6 = new case(subject = 'Test ITSM Queue Assignment to 2nd Level',Description = 'Test ITSM Queue Assignment to 2nd Level Description GDPR', Origin = 'Email', Status= Constants.sCaseStatusWaitingForBMW, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        lstCase.add(oCase6);
+        
+        Case oCase7 = new case(Description = 'Case without subject GDPR', Origin = 'Email', Status= Constants.sCaseStatusInProgress, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+
+        lstCase.add(oCase7);
+        //start : WHCRM-59210
+        Case oCase8 = new case(Description = 'Case with subject and vin in description - WBATR95000NC88BMW  company number 1378137', Subject = 'Test Email VIN', Origin = 'Email', Status= Constants.sCaseStatusInProgress, Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+        
+        lstCase.add(oCase8);
+        //end : WHCRM-59210
+        
+        //Case oCase8 = new case( subject = 'Test Case8', Follow_Up_Date_Time__c = System.now(), Description = 'Test Status Change',Origin = 'Email', Status='Follow Up', OwnerId = UserInfo.getUserId(), Business_Area__c='BMW WELT', Case_Topic_Group__c = 'BMW Assist', AccountId = myTestAccount.Id);
+        Case oCase9 = new case(Description = 'Case with subject and vin in description - WBATR95000NC88BMW  company number 1378137 test', Subject = 'Test Email VIN test', Origin = 'Email', Status= 'In Progress',Case_Transfer_Status__c='Retail', Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id, Brand__c='BMW');
+         
+        lstCase.add(oCase9);
+        
+        Insert lstCase;
+        Case oUpdateCase = [Select id,status from Case where status='In Progress' limit 1];
+        oUpdateCase.BMW_Unit__c = 'DE-NSC'; //WHCRM-54670
+        oUpdateCase.Status = 'Resolved';
+        oUpdateCase.AccountId = acc2.Id;
+        update oUpdateCase;
+           
+        Case_Category_Mapping__c varCCM = new Case_Category_Mapping__c(
+            Case_Mapping_Label__c = 'DE-NSC_Inquiry_BMW Motorrad_Invoice',
+            BMW_Unit__c = 'DE-NSC',
+            Case_Business_Area__c = 'BMW WELT',
+            Case_Topic_Group__c = 'Invoice',
+            Case_Type__c = 'Inquiry',
+            Retention_Category__c = 'Legal');
+        insert varCCM;
+        
+        Retention_Period__c varRP = new Retention_Period__c (
+    
+            BMW_Unit__c = 'DE-NSC',
+            Value__c = 120, 
+
+            DE_NSC__C = 120,
+            Retention_Label__c = 'Case_Legal_ActiveCustomer',
+            Object_Name__C = 'Case'
+        );
+      
+        //WHCRM-74015 - Added Vehicle_Type__c = 'CAR' (Epic WHCRM-63119)
+        Case_Code__c testCaseCode = new Case_Code__c(
+            Market_Identifier__c = 'TestCC1',
+            Level_1__c = 'TestL1',
+            Level_2__c = 'TestL2',
+            Level_3__c = 'TestL3',
+            Business_Area__c = 'BMW WELT',
+            Case_Topic_Group__c = 'Accessories',
+            Case_Topic__c = 'Availability',
+            Vehicle_Type__c = 'CAR',
+            Active__c = true
+        );
+        insert testCaseCode;
+    }
+   //Test method for setSLADateCasecreate and update
+    static testmethod void setSLADateCase_Test()
+    {
+        User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c = 'DE-NSC';
+        user.Default_Queue__c ='DE 1 Clearing';
+        insert user;
+        List<SlaProcess> lstEntitlementProcess = [SELECT Id, Name FROM SlaProcess WHERE Name='DE-NSC Enhanced' and IsActive = true LIMIT 1];
+
+        system.runAs(user){
+        List<Case> updatedCases = new List<Case>();
+        List<Case> lstCase = TestDataFactory.createCase(10, false);
+            for(Case case1 :lstCase){
+            case1.BMW_Unit__c='DE-NSC';
+            case1.Status ='In Progress';
+            case1.Isstopped = true;
+            case1.Prioritize_Case__c =false;
+            case1.Priority = 'Low';
+            case1.SLA_Start_Date__c = system.now();
+    }
+        Test.startTest();
+            Case_Prioritization__c prior = new Case_Prioritization__c(Name='1st Level',SLA_Due_Hours1__c =8,SLA_Due_Hours2__c=5,SLA_Due_Hours3__c=2);
+                insert prior;
+            List<Account> accList = TestDataFactory.createAccount(1, true, PERSONACCOUNT_RECORDID);
+            Entitlement Ent1= new entitlement(name='Standard Support',accountid=accList[0].id, StartDate=Date.valueof(System.now().addDays(-2)), EndDate=Date.valueof(System.now().addYears(2)));
+            insert Ent1;
+  
+        //Associate Entitlement Process to Entitlement record
+        if (lstEntitlementProcess.size()>0)
+        {
+            Ent1.SlaProcessId = lstEntitlementProcess[0].id;
+            update Ent1;        
+        }
+            insert lstCase;
+        
+            for(Case case1:lstCase) {     
+                Case updatedCase = new Case(Id=case1.Id,Isstopped = false,status='Resolved',Prioritize_Case__c=true, Priority='High');
+            updatedCases.add(updatedCase);
+            }
+                update updatedCases;
+        Test.stopTest();
+
+        List<Case> oUpdatedCase1 = [Select Id,SLA_Start_Date__c,SLA_Due_Date__c,Priority, Status from Case order by Status];
+        List<CaseMilestone> oCaseMilestone = [Select Id,StartDate,TargetDate from CaseMilestone where caseId IN: oUpdatedCase1];
+            System.assertEquals('Default', oUpdatedCase1[0].Priority);//WHCRM-78868
+            System.assertNotEquals('Conflict', oUpdatedCase1[0].status);
+
+
+    }
+    
+    }
+    //test method for peCaseHandlerCreate and update
+    static testmethod void peCaseHandler_Test()
+    {
+        User user = TestDataFactory.createUser(true);
+        system.runAs(user){
+            List<Account> accList = TestDataFactory.createAccount(2, false, PERSONACCOUNT_RECORDID);
+            accList[0].BMW_Unit__c = 'BE-NSC';
+            accList[0].Salutation='M';
+            accList[1].BMW_Unit__c = 'BE-NSC';
+            accList[1].Salutation='M';
+            insert accList;
+            List<Case_Code__c> lstCaseCodes = createCaseCode(2, 'BE-NSC', false);
+            lstCaseCodes[0].Business_Area__c ='DIGITAL SERVICES';
+            lstCaseCodes[1].Business_Area__c ='DIGITAL SERVICES';
+            insert lstCaseCodes;
+            List<Case> caseList = TestDataFactory.createNewCase(10, false);
+            List<Case> caseList2 = TestDataFactory.createNewCase(10,false);
+            for(Case case1: caseList){
+                case1.BMW_Unit__c ='BE-NSC';
+                case1.status ='In Progress';
+                case1.Case_Code__c =lstCaseCodes[0].Id;
+                case1.Case_Transfer_Status__c ='Wholesale';
+            }
+            for(Case case1:caseList2){
+                case1.BMW_Unit__c ='UK-NSC';
+                case1.Case_Code__c =lstCaseCodes[1].Id;
+            }
+        Test.startTest();
+        insert caseList;
+        insert caseList2;
+        for(Case case1: caseList){
+            case1.AccountId =accList[0].Id;
+            case1.Status ='Waiting for Dealer';
+            case1.Case_Transfer_Status__c ='Retail';
+        }
+            for(Case case1: caseList2){
+                case1.AccountId =accList[0].Id;
+                case1.Status ='Resolved';
+            }
+        update caseList;
+        Test.stopTest();
+        List<EventBusSubscriber> eventBusPublish = [SELECT Name, Position, Retries, LastError 
+                                    FROM EventBusSubscriber 
+                                    WHERE Type='ApexTrigger'];
+        System.assert(!eventBusPublish.isEmpty());
+        }
+
+    }
+    
+    static testmethod void ManualCaseCreate_Test()
+    {
+    Test.startTest();
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        Account myTestAccount = new Account(FirstName = 'Robby ', LastName = 'Naish', PersonEmail = 'any@anydomain.com', RecordTypeId = recordTypeId);
+        insert myTestAccount;
+        //WHCRM-74015 - Commented Case_Topic_Group__c = 'BMW Assist' (Epic WHCRM-63119)
+        //WHCRM-74015 - Updated Business_Area__c = 'BMW WELT' to Business_Area__c='DIGITAL SERVICES' (Epic WHCRM-63119)
+        Case oCase = New Case(subject = 'Test', Description = 'Desc', Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id,Brand__c = 'BMW');
+        insert oCase;
+        oCase = [Select OwnerID, Subject From Case where ID = :oCase.id];
+        system.assertNOTEquals(null,oCase.OwnerID);
+        system.assertEquals('Test', oCase.Subject);
+    Test.stopTest();
+        
+    }
+    //Test method for setSeviceLevelBMWUnit
+    static testmethod void setSeviceLevelBMWUnitUpdate_Test(){
+        CaseUtility handlerObj = new CaseUtility();
+        Case oInsertedCase = [Select Id, OwnerId, Subject, Description, Queue__c, Origin from Case where subject = 'Test Case2' and Origin = 'Email'];
+        List<Case> lstNewCase = new list<Case>();
+        lstNewCase.add(oInsertedCase);
+        
+        Map<Id,Case> mapNewCase = new Map<Id,Case>();
+        Case oUpdatedCase = new Case(Id=oInsertedCase.Id);
+        update oUpdatedCase;
+        mapNewCase.put(oUpdatedCase.Id, oUpdatedCase); 
+        
+        Test.startTest();
+        handlerObj.setSeviceLevelBMWUnit(true,lstNewCase,lstNewCase, mapNewCase, mapNewCase);
+        Test.stopTest();
+        
+        oUpdatedCase = [Select Id, BMW_Unit__c From Case where ID = :oUpdatedCase.id];
+        system.assertNOTEquals(null,oUpdatedCase.BMW_Unit__c);
+    }
+    //Test method for handleMigratedCases
+    static testmethod void handleMigratedCases_Test(){
+        CaseUtility handlerObj = new CaseUtility();
+        
+        Profile p = [SELECT Id FROM Profile WHERE Name='BMW Admin']; 
+        User oUser = new User(Alias = 'standt', Email='bmwusertest122113@testorg.com', 
+                          EmailEncodingKey='UTF-8', LastName='Testing', LanguageLocaleKey='en_US', 
+                          LocaleSidKey='en_US', ProfileId = p.Id, 
+                          TimeZoneSidKey='America/Los_Angeles', UserName='bmwtestuser21122113@testorg.com', BMW_Unit__c = 'DE-NSC');
+        insert oUser;
+
+        PermissionSet ps = [SELECT Id FROM PermissionSet WHERE Name = 'Migration_Permission'];
+        system.runAs(oUser){
+      insert new PermissionSetAssignment(AssigneeId = oUser.id, PermissionSetId = ps.Id);
+        }
+         Test.startTest();
+        Case oInsertedCase = [Select Id, OwnerId,BMW_Unit__c,AccountId, EntitlementId,Subject, Description, Origin from Case where subject = 'Test Case2' and Origin = 'Email'];
+        List<Case> lstNewCase = new list<Case>();
+        lstNewCase.add(oInsertedCase);
+        
+        Map<Id,Case> mapNewCase = new Map<Id,Case>();
+        Case oUpdatedCase = new Case(Id=oInsertedCase.Id);
+        update oUpdatedCase;
+        mapNewCase.put(oUpdatedCase.Id, oUpdatedCase); 
+        
+        System.runAs(oUser) {
+            
+           
+            handlerObj.handleMigratedCases(lstNewCase,lstNewCase, mapNewCase, mapNewCase);
+            Test.stopTest();
+        }
+        // START WHCRM-78868
+        list<case> caseTest =[SELECT id,Origin from case];
+        system.assertEquals('Email', caseTest[0].Origin);
+        // END WHCRM-78868
+    }
+    //Test method for UpdateCasePriority also covered with method setSeviceLevelBMWUnit
+    static testmethod void UpdateCasePriority_Test(){
+        
+        List<Case> newCaseList = TestDataFactory.createNewCase(1, false);
+        newCaseList[0].Subject = 'Test Medium Connected and Test High1 Connected';
+        newCaseList[0].BMW_Unit__c = 'DE-NSC';
+        newCaseList[0].Origin = 'Email'; //WHCRM-88985
+        
+        Test.startTest();
+        insert newCaseList;
+        Case oCase = [SELECT Id, Subject, Priority, Queue__c FROM Case WHERE Subject = 'Test Medium Connected and Test High1 Connected'];
+        Assert.areEqual('High', oCase.Priority);
+        Assert.areEqual('DE 1 CD KE', oCase.Queue__c, '');
+        Test.stopTest();
+    }
+    //Test Method for completeMilestone
+    static testmethod void completeMilestone_Test(){
+        User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c ='DE-NSC';
+        insert user;
+        Group testQueue =[SELECT Id,Name,Type FROM Group WHERE DeveloperName = 'DE_2_CD_KE' AND Type = 'queue'  ];
+        Entitlement Ent = [Select Id, Name from Entitlement Where name = 'Standard Support' limit 1];
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        system.runAs(user){
+            List<Account> accList = TestDataFactory.createAccount(3, true, PERSONACCOUNT_RECORDID);
+            List<Case_Code__c> caseCodeList = TestDataFactory.createCaseCode(3, 'DE-NSC', true);
+            List<Case> caseList = TestDataFactory.createNewCase(10, false);
+            List<Case> caseList2 = TestDataFactory.createNewCase(10, false);
+            List<Case> caseList3 = TestDataFactory.createNewCase(10, false);
+            for(Case case1: caseList){
+                case1.Status='In Progress';
+                case1.Service_Levels__c = '1st Level';
+                case1.OwnerId = testQueue.Id;
+                case1.EntitlementId = Ent.Id;
+                case1.Business_Area__c='DIGITAL SERVICES';
+    }
+            for(Case case1: caseList2){
+                case1.Status='In Progress';
+                case1.Service_Levels__c = '2nd Level';
+                case1.EntitlementId = Ent.Id;
+                case1.Business_Area__c='DIGITAL SERVICES';
+            }
+            for(Case case1: caseList3){
+                case1.Status='In Progress';
+                case1.Service_Levels__c = '3rd Level';
+                case1.Business_Area__c='DIGITAL SERVICES';
+            }
+            Test.startTest();
+            insert caseList;
+            insert caseList2;
+            insert caseList3;
+            for(Case case1:caseList3){
+                case1.AccountId = accList[0].Id;
+                case1.Service_Levels__c = '1st Level';
+                case1.Status = 'Waiting for Customer';
+            }
+            for(Case case1:caseList2){
+                case1.Service_Levels__c = '1st Level';
+                case1.Status = 'Resolved';
+            }
+            update caseList2;
+            update caseList3;
+            Test.stopTest();
+            List<CaseMilestone> lstCaseMilestone = [select id, completionDate from CaseMilestone where caseId IN: caseList2];
+            system.assertNotEquals(null, lstCaseMilestone[0].completionDate);
+        } 
+    }
+  //Test Method for assignCaseToPreviousQueue create and update
+    static testmethod void assignCaseToPreviousQueue_Test(){
+        User user = TestDataFactory.createUser(false);
+            user.BMW_Unit__c = 'BE-NSC';
+            insert user;
+        system.runAs(user){
+            Test.startTest();
+            List<Queue_Setup__c> lstQueues = new List<Queue_Setup__c>();
+                Queue_Setup__c queueSetup = new Queue_Setup__c (Name = 'BE 1 CC DE');
+            lstQueues.add(queueSetup);
+            insert lstQueues;
+            List<Case> caseList = TestDataFactory.createCase(2, false);
+            caseList[0].Subject ='Reopened';
+            caseList[0].Queue__c ='BE 1 CC DE';
+            caseList[0].BMW_Unit__c ='BE-NSC';
+            caseList[1].BMW_Unit__c ='DE-NSC';
+            caseList[1].status ='Resolved';
+            insert caseList;
+           // List<Case> lstCase1 = [Select Id, Status,Follow_Up_Date_Reached__c,owner.Name,Queue__c from Case order by BMW_Unit__c ASC];
+            caseList[0].Status = 'Reopened';
+            caseList[0].Follow_Up_Date_Reached__c = true;
+            //update caseList;
+        //Test.stopTest();
+            List<Case> lstCase = [Select Id, owner.Name,Queue__c from Case order by BMW_Unit__c ASC];
+            //system.assertEquals(lstCase[0].Queue__c,lstCase[0].Owner.Name);
+        
+    }
+    
+    }
+    //Test method for setBrandUpdate and create
+    static testmethod void setBrandUpdate_Test(){
+        User user = TestDataFactory.createUser(false);
+            user.BMW_Unit__c = 'BE-NSC';
+            insert user;
+        system.runAs(user){
+            test.startTest();
+            List<Asset> ass = TestDataFactory.createAsset(2, false);
+            ass[0].Brand__c ='MINI';
+            insert ass;
+            List<Case> caseList = TestDataFactory.createCase(1, false);
+            caseList[0].AssetId = ass[0].Id;
+            insert caseList;
+            List<Case> lstCase = [Select Id,Brand__c from Case];
+            system.assertEquals('BMW', lstCase[0].Brand__c);
+            caseList[0].AssetId = ass[1].Id;
+            update caseList;
+            test.stopTest();
+            List<Case> lstCase1 = [Select Id,Brand__c from case];
+            system.assertEquals('BMW', lstCase1[0].Brand__c);
+        }
+    }
+    //Test method for scanCaseAndUpdate
+    static testmethod void scanCaseAndUpdate_Test(){
+        //CaseUtility handlerObj = new CaseUtility();
+        User user = TestDataFactory.createUser(true);
+        Test.startTest();
+        system.runAs(user){
+            try{
+        List<Asset> lstAsset = TestDataFactory.createAsset(2, true);
+        List<Account> lstAccount = TestDataFactory.createAccount(2, false, PERSONACCOUNT_RECORDID);
+            lstAccount[0].GCID__c ='GCID-87yghti-87ujku-bbghjkiu-988iklj';
+            insert lstAccount;
+        List<Case_Code__c> lstCaseCodes = TestDataFactory.createCaseCode(2, 'BE-NSC', true);
+        List<Case> lstCase = TestDataFactory.createNewCase(10, false);
+         List<Case> lstCase1 = TestDataFactory.createNewCase(10, false);
+        for(Case case1:lstCase){
+            case1.AccountId = lstAccount[0].Id;
+            case1.Case_Code__c = lstCaseCodes[0].Id;
+            case1.subject = 'company number 1378137';
+            case1.AssetId = lstasset[0].Id;
+            case1.Description ='VIN='+lstAsset[0].VIN_Long__c+'GCID='+lstAccount[0].GCID__c;
+        }
+            for(Case case1:lstCase1){
+            case1.AccountId = lstAccount[1].Id;
+            case1.Case_Code__c = lstCaseCodes[0].Id;
+            case1.subject = 'company number 1378137';
+            case1.AssetId = lstasset[1].Id;
+            case1.BMW_Unit__c ='DE-NSC';
+            case1.Description ='VIN='+lstAsset[1].VIN_Long__c+'GCID='+lstAccount[1].GCID__c;
+        }
+        
+    insert lstCase;
+            insert lstCase1;
+        Test.stopTest();
+                list<case> caseTest =[SELECT id,subject from case];
+                system.assertEquals('Test Case1', caseTest[0].subject);//WHCRM-78868
+            }catch(Exception ex){
+                
+            }
+        }
+    }
+    
+    static testmethod void Motorrad2ndQueue(){
+        
+        Group testQueue =[SELECT Id,Name,Type FROM Group WHERE Name = 'DE 2 BMW Motorrad' AND Type = 'queue' ];
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        Account myTestAccount = new Account(FirstName = 'Robby ', LastName = 'Naish', PersonEmail = 'any@anydomain.com', RecordTypeId = recordTypeId);
+        insert myTestAccount;
+        Test.startTest();
+        //WHCRM-74015 - Commented Case_Topic_Group__c = 'BMW Assist' (Epic WHCRM-63119)
+        //WHCRM-74015 - Updated Business_Area__c = 'BMW WELT' to Business_Area__c='DIGITAL SERVICES' (Epic WHCRM-63119)
+        Case oCase1 = new case(subject = 'Test Case1 Motorrad',Description = 'Test High', Origin = 'Email', Status='In Progress', Business_Area__c='DIGITAL SERVICES', /*Case_Topic_Group__c = 'BMW Assist',*/ AccountId = myTestAccount.Id,Brand__c = 'BMW');
+        insert oCase1;
+        
+        
+        list<Case> lstCaseUpdate = new list<Case>();
+    Case oInsertedCase1 = [Select Id, OwnerId,status, Subject, Description from Case where subject = 'Test Case1 Motorrad' and Origin = 'Email'];
+        oInsertedCase1.OwnerId =testQueue.Id;
+        update oInsertedCase1;
+        Test.stopTest();
+    }
+    
+//test method for setDefaultEmailOutAddress
+    /*static testmethod void setDefaultEmailOutAddress_Test(){
+        User user = TestDataFactory.createUser(true);
+        system.runAs(user){
+            List<Case_Code__c> caseCodeList = createCaseCode(2, 'BE-NSC', false);
+            caseCodeList[0].Business_Area__c ='DIGITAL SERVICES';
+            caseCodeList[1].Business_Area__c ='DIGITAL SERVICES';
+             insert caseCodeList;
+            List<Case_Code__c> lstCaseCodes = [Select Id from Case_Code__c where Id IN:caseCodeList order by BMW_Unit__c];
+            List<Case> caseList = TestDataFactory.createNewCase(10, false);
+            for(Case case1:caseList){
+                case1.BMW_Unit__c ='DE-NSC';
+                case1.Case_Code__c =lstCaseCodes[0].Id;
+                case1.Status = 'New';
+                case1.Brand__c='BMW';
+    }
+            List<Case> caseList2 = TestDataFactory.createNewCase(10, false);
+            for(Case case1:caseList2){
+                case1.BMW_Unit__c ='UK-NSC';
+                case1.Case_Code__c =lstCaseCodes[1].Id;
+                case1.Status = 'New';
+                case1.Brand__c='BMW';
+            }
+            Test.startTest();
+                insert caseList;
+                insert caseList2;
+            List<Case> lstCase = [Select Id,Brand__c,Business_Area__c from Case order by BMW_Unit__c];
+            for(Case case1:lstCase){
+                case1.Brand__c='MINI';
+                case1.Business_Area__c = 'VEHICLE';
+            }
+            update lstCase;
+            Test.stopTest();
+            List<Case> lstCase2 = [Select Id,Brand__c,DefaultOutboundEmailaddress__c from Case order by BMW_Unit__c];
+            system.assertNotEquals(null, lstCase2[0].DefaultOutboundEmailaddress__c);//WHCRM-78868
+        }
+    }*/
+    //Test method for sendErrorsAsPlatformEvent
+    static testmethod void sendErrorsAsPlatformEvent_Test(){
+        
+        CaseUtility handlerObj = new CaseUtility();
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        Account myTestAccount = new Account(FirstName = 'Robby ', LastName = 'Naish', PersonEmail = 'any@anydomain.com', RecordTypeId = recordTypeId);
+        insert myTestAccount;
+        List<Case_Code__c> caseCodeList = TestDataFactory.createCaseCode(1, 'BE-NSC', false);
+        caseCodeList[0].Business_Area__c = 'DIGITAL SERVICES';
+        List<Case> caseList = TestDataFactory.createNewCase(10, false);
+        for(Case case1:caseList){
+            case1.Origin ='Phone';
+            case1.Status ='In Progress';
+        }
+    Test.startTest();
+        insert caseList;
+        try 
+        {
+            for(Case case1: caseList){
+            case1.Status = Constants.sCaseStatusClosed;
+            }
+            update caseList;
+            
+        }
+        catch(Exception e)
+        {
+            handlerObj.sendErrorsAsPlatformEvent(caseList,'Update',e);
+        }
+            Test.stopTest();
+        List<EventBusSubscriber> eventBusPublish = [SELECT Name, Position, Retries, LastError 
+                                    FROM EventBusSubscriber 
+                                    WHERE Type='ApexTrigger'];
+        System.assert(!eventBusPublish.isEmpty());
+        }
+    
+    @isTest
+    public static void checkCaseCodeBE()
+    {
+        List<Case> lstCase = new List<Case>();
+        Case oCase1 = new case(subject = 'Test Case CR 00161765',Brand__c = 'BMW', Description = 'Test High', Origin = 'Email', Status='New', Business_Area__c='DIGITAL SERVICES',  BMW_Unit__c = 'BE-NSC', Custom_Case_Code__c = 'AfterSales, Accesories, Charging infrastructure');
+        lstCase.add(oCase1);
+        
+        Test.startTest();
+          Insert lstCase;
+        Test.stopTest();
+    }
+    //test method for setOldCaseCodingFields which will set case code values on case
+    @isTest
+    public static void setOldCaseCodingFields_Test() {
+        User user = TestDataFactory.createUser(true);
+        system.runAs(user){
+           List<Case_Code__c> caseCodeList = TestDataFactory.createCaseCode(2, 'DE-NSC', true);
+           List<Case> caseList = TestDataFactory.createNewCase(10, false);
+            for(Case case1 : caseList){
+                case1.Case_Code__c = caseCodeList[0].Id;
+    }
+        Test.startTest();
+            insert caseList;
+            for(case case1:caseList){
+                case1.Case_Code__c = null;
+                case1.Type = 'Spam';
+            }
+            update caseList;
+        Test.stopTest();
+            List<Case> lstCase = [Select Id,Business_Area__c from Case];//WHCRM-78868
+            system.assertEquals('DIGITAL SERVICES', lstCase[0].Business_Area__c);//WHCRM-78868
+    }
+
+    }
+//test method for checkCommentsForOwnerBE
+    @isTest
+    public static void checkCommentsForOwnerBE_Test() {
+        User user = TestDataFactory.createUser(false);
+            user.BMW_Unit__c = 'BE-NSC';
+        user.FirstName = 'FirstName';
+        user.LastName = 'Lastname';
+            insert user;
+            TestDataFactory.assignPermissionSet(user);
+            PermissionSet integrationUserPermission = [SELECT Id from PermissionSet WHERE Name IN (:Constants.sIntegration_Cust_Per) limit 1];
+            PermissionSetAssignment permissionAssignment = new PermissionSetAssignment(AssigneeId = user.Id, PermissionSetId = integrationUserPermission.Id);
+            	insert permissionAssignment;
+        system.runAs(user){
+        Test.startTest();
+            user usr = [Select Id,Name from user WHERE Id = :user.Id Limit 1];
+            List<Case> caseList = TestDataFactory.createCase(2, false);
+            caseList[0].BMW_Unit__c ='BE-NSC';
+            caseList[0].Status ='New';
+            caseList[0].TopDrive_Case_ID__c=usr.Name;
+            caseList[0].Custom_Case_Code__c =usr.Name;
+            caseList[1].BMW_Unit__c ='DE-NSC';
+            caseList[1].Custom_Case_Code__c =usr.Name;
+            insert caseList;
+            ////WHCRM-78868
+            List<Case> lstCase = [Select Id,Custom_Case_Code__c,OwnerId from Case WHERE Id IN :caseList order by BMW_Unit__c ASC];
+            system.assertEquals(null, lstCase[0].Custom_Case_Code__c);
+            system.assertEquals(usr.Id, lstCase[0].OwnerId);
+			Test.stopTest();
+            //WHCRM-78868            
+    }
+     }
+    //Test method for setDefaultQueueIntegrationUser
+    @isTest
+    public static void setDefaultQueueIntegrationUser_Test() {
+        User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c = 'DE-NSC';
+        insert user;
+        TestDataFactory.assignPermissionSet(user);
+        PermissionSet integrationUserPermission = [SELECT Id from PermissionSet WHERE Name IN (:Constants.sIntegration_Cust_Per) limit 1];
+        PermissionSetAssignment permissionAssignment = new PermissionSetAssignment(AssigneeId = user.Id, PermissionSetId = integrationUserPermission.Id);
+        insert permissionAssignment;
+        system.runAs(user){
+            test.startTest();
+            List<Lead> leadList = TestDataFactory.createLead(1, false);
+            leadList[0].Rfx__c ='RFC Request for Contact';
+            leadList[0].BMW_Unit__c = 'DE-NSC';
+            insert leadList;
+            List<Case> caseList = TestDataFactory.createCase(2, false);
+            caseList[0].Converted_From_Lead_Id__c = leadList[0].id;
+            caseList[0].subject = 'RFC: ';
+            caseList[0].Origin = 'Web';
+            caseList[0].Status ='New';
+            caseList[0].BMW_Unit__c ='DE-NSC';
+            insert caseList;
+            List<Case> CasesInserted = [Select Id,Queue__c from Case order by BMW_Unit__c ASC];
+            
+        }
+    }
+    //Test methd for setITSMField which will set ITSM Id field on Case
+    @isTest
+  public static void setITSMField_Test() {
+      User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c = 'DE-NSC';
+        insert user;
+      system.runAs(user){
+          test.startTest();
+          List<Case> caseList = TestDataFactory.createCase(2, false);
+          caseList[0].Subject = 'INC0000678543444 test Case';
+          caseList[0].status ='New';
+          caseList[0].BMW_Unit__c ='DE-NSC';
+          caseList[1].BMW_Unit__c ='BE-NSC';
+          //caseList[2].BMW_Unit__c ='BE-NSC';
+          insert caseList;
+          caseList[0].Subject ='INC0000678543565 test case update';
+          update caseList;
+          List<Case> lstCase = [Select Id,ITSM_ID__c,EntitlementId from Case order by BMW_Unit__c];
+          system.assertNotEquals('INC000067854356', lstCase[1].ITSM_ID__c);
+          test.stopTest();
+      }
+  }
+    //Test method for setEntitlement
+    @isTest
+    public static void setEntitlement_Test(){
+        User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c = 'DE-NSC';
+        insert user;
+        system.runAs(user){
+          Test.startTest();
+          List<Account> accList = TestDataFactory.createAccount(1, false, PERSONACCOUNT_RECORDID);
+            accList[0].BMW_Unit__c ='DE-NSC';
+            insert accList;
+            //Account acc = [Select ID from Account where BMW_Unit__c ='DE-NSC' limit 1];
+          Entitlement Ent1= new entitlement(name='Standard Support',accountid=accList[0].id, StartDate=Date.valueof(System.now().addDays(-2)),BMW_Unit__c ='DE-NSC', EndDate=Date.valueof(System.now().addYears(2)));
+            insert Ent1;
+            List<Case> caseList = TestDataFactory.createCase(2, false);
+            caseList[0].BMW_Unit__c ='DE-NSC';
+            caseList[0].AccountId = accList[0].Id;
+            caseList[1].Origin ='Web';
+            insert caseList;
+            //WHCRM-78868
+            List<Case> lstCase = [Select Id,EntitlementId from Case order by BMW_Unit__c];
+            system.assertNotEquals(Ent1.Id, lstCase[1].EntitlementId);
+            //WHCRM-78868
+            Test.stopTest();
+           
+        }
+    }
+    //Test method for setBMWUnitANDServiceLevelsCreate
+    @isTest
+    public static void setBMWUnitANDServiceLevelsCreate_Test() {
+      User user = TestDataFactory.createUser(false);
+        user.BMW_Unit__c = 'DE-NSC';
+        user.Default_Queue__c ='DE 1 Clearing';
+        insert user;
+        test.startTest();
+      system.runAs(user){
+        
+          List<Case> caseList = TestDataFactory.createCase(1, false);
+          caseList[0].status ='New';
+          caseList[0].Origin ='Web';
+          caseList[0].BMW_Unit__c ='DE-NSC';
+          
+          insert caseList;
+          //WHCRM-78868
+          List<Case> lstCase = [Select Id,Status,Service_Levels__c,Service_Level_Time__c,Complete_Milestone_on_Waiting_Status__c from Case order by BMW_Unit__c];
+          system.assertEquals('1st Level', lstCase[0].Service_Levels__c);
+          system.assertEquals('1st Level', lstCase[0].Service_Level_Time__c);
+          //WHCRM-78868
+      }
+        user.Default_Queue__c=null;
+        update user;
+        system.runAs(user){
+            List<Case_Code__c> caseCodeList = TestDataFactory.createCaseCode(1, 'DE-NSC', true);
+            List<Case> caseLst = TestDataFactory.createNewCase(1, false);
+            caseLst[0].case_Code__c =caseCodeList[0].Id;
+            caseLst[0].Subject ='Test null Default queue';
+            caseLst[0].BMW_Unit__c ='BE-NSC';
+            caseLst[0].Origin ='Web';
+            caseLst[0].Status ='New';
+            insert caseLst;
+            system.debug('testp1'+caseLst[0]);
+            system.assertEquals('BE-NSC', caseLst[0].BMW_Unit__c);
+        }
+       test.stopTest();
+
+  }
+   //Test method for SetIsSensitiveFlag
+    @isTest
+    public static void SetIsSensitiveFlag_test() {
+        
+        Group queueUSSPI = (new List<Group>([SELECT Id FROM Group WHERE Type = 'Queue' AND DeveloperName = 'US_SPI']))?.get(0);
+        User u = TestDataFactory.createUser(false);            
+        u.BMW_Unit__c = 'US-NSC';
+        insert u;
+        id publicGroupId1 = [Select Id FROM Group WHERE Type = 'Queue' AND DeveloperName = 'US_SPI'].Id;
+        List<GroupMember> GMlist = new List<GroupMember>();
+        GroupMember GM = new GroupMember();
+        GM.GroupId = publicGroupId1;
+        GM.UserOrGroupId = U.Id;
+        GMList.add(GM);
+        id publicGroupId2 = [Select Id FROM Group WHERE DeveloperName = 'US_NSC' AND Type = 'Regular'].Id;
+        GroupMember GM2 = new GroupMember();
+        GM2.GroupId = publicGroupId2;
+        GM2.UserOrGroupId = U.Id;
+        GMList.add(GM2);
+        
+        if(!GMList.isEmpty()) {
+            insert GMList;
+        }        
+        
+         system.runAs(u){
+        List<Case_Code__c> caseCodeList = TestDataFactory.createCaseCode(2, 'US-NSC', true);
+        List<Case> caseList = TestDataFactory.createNewCase(10, false);
+        List<Case> caseList1 = TestDataFactory.createNewCase(10, false);
+        for(Case case1:caseList){
+            case1.BMW_Unit__c = 'US-NSC';
+            case1.Brand__c = 'BMW';
+            case1.Case_Code__c = caseCodeList[0].Id;
+            case1.OwnerId = queueUSSPI.Id;
+        }
+        for(Case case1:caseList1){
+            case1.BMW_Unit__c = 'US-NSC';
+            case1.Brand__c = 'BMW';
+            case1.Case_Code__c = caseCodeList[0].Id;
+        }
+            Test.startTest();
+                insert caseList;
+                insert caseList1;
+             List<Case> lstCase1 = [Select Id,isSensitive__c from Case where Id IN:caseList1];
+             system.assertNotEquals(true, lstCase1[0].isSensitive__c);
+            Test.stopTest();
+           
+        }
+        
+    }        
+    //Test method for reassignReopenedCasesToSpecializedQueues
+    @isTest
+    public static void reassignReopenedCasesToSpecializedQueues_Test() {
+
+        //Get Custom Metadata Records
+        List<Responded_Cases_Queue_Reassignment__mdt> mdtList = Responded_Cases_Queue_Reassignment__mdt.getAll().values();
+
+        
+        if(mdtList.isEmpty()){ return;}
+        
+        //Test as BMW System user changing the case from Resolved to Responded
+        User u = TestDataFactory.createUser(false);            
+
+        u.BMW_Unit__c = 'US-NSC';
+
+        u.alias = 'bsystem';
+
+        u.ProfileId = [SELECT Id FROM Profile WHERE Name = 'BMW Admin' LIMIT 1].Id;
+
+        
+        //Query the Queues
+        Group currentQueue = [SELECT Id FROM Group WHERE TYPE = 'Queue' AND Name = :mdtList[0].Current_Queue_Label__c];
+
+        Group reassignedQueue  = [SELECT Id, Name FROM Group WHERE TYPE = 'Queue' AND DeveloperName = :mdtList[0].Queue_Developer_Name_To_Reassign__c];
+
+        
+        //Resolve some cases
+        Case oCase1 = new case(subject = 'Test Case1', Description = 'Test', Origin = 'Phone', Brand__c='BMW', OwnerId = currentQueue.Id, Exit_Reason__c = 'Campaign Completed', BMW_Unit__c = 'US-NSC');
+        
+        oCase1.put(mdtList[0].Condition_1_Field_Developer_Name__c != null ? mdtList[0].Condition_1_Field_Developer_Name__c : 'Origin', mdtList[0].Condition_1_Field_Value__c != null ? mdtList[0].Condition_1_Field_Value__c : 'Phone');
+        
+        oCase1.Status = 'Resolved';
+
+        Case oCase2 = new case(subject = 'Test Case2', Description = 'Test', Origin = 'Phone', Brand__c='BMW', OwnerId = currentQueue.Id, Exit_Reason__c = 'Campaign Completed', BMW_Unit__c = 'US-NSC');
+
+        oCase2.put(mdtList[0].Condition_1_Field_Developer_Name__c != null ? mdtList[0].Condition_1_Field_Developer_Name__c : 'Origin', mdtList[0].Condition_1_Field_Value__c != null ? mdtList[0].Condition_1_Field_Value__c : 'Phone');
+        
+        oCase2.Status = 'Resolved';  
+
+        Test.startTest();
+        
+        //Change to Responded with user bsystem   
+        System.runAs(u){
+
+            List<Case> csList = new List<Case>{oCase1, oCase2};
+
+            insert csList;
+            
+            oCase1.Status = 'Responded';
+
+            oCase2.Status = 'Responded';
+
+            update csList;
+            
+    }
+
+        Test.stopTest();
+
+        Case oCase1Check = [SELECT Id, Queue__c, OwnerId FROM Case WHERE Id = :oCase1.Id];
+        
+        Case oCase2Check = [SELECT Id, Queue__c, OwnerId FROM Case WHERE Id = :oCase2.Id];
+        
+        //Check the Queues and Owners Ids
+
+        System.assertEquals(reassignedQueue.Name, oCase1Check.Queue__c);
+
+        System.assertEquals(reassignedQueue.Id, oCase1Check.OwnerId);
+
+        System.assertEquals(reassignedQueue.Name, oCase2Check.Queue__c);
+
+        System.assertEquals(reassignedQueue.Id, oCase2Check.OwnerId);
+    }   
+    
+    @isTest
+    public static void testcodecoverageIssue() {
+        Case oCase1 = new case(subject = 'ref:_Demo Case to Reassigned: ',Brand__c = 'BMW', Description = 'ref:_Demo Case to Reassigned:', Status='New',Origin='Phone', BMW_Unit__c = 'DE-NSC');
+              
+        User DE_User = TestDataFactory.createUser(false);           
+        DE_User.BMW_Unit__c = 'DE-NSC';
+        DE_User.alias = 'ssOliv';
+        DE_User.ProfileId = [SELECT Id FROM Profile WHERE Name = 'BMW Admin' LIMIT 1].Id;
+        DE_User.Default_Queue__c = 'DE 1 Produkt Telefon';
+        insert DE_User;
+        
+        system.runAs(DE_User)
+        {
+        Test.startTest();
+        insert oCase1;
+             oCase1.Status = Constants.sCaseStatusInProgress;
+            
+            Update oCase1;
+        Test.stopTest();
+    }
+    }
+    /* WHCRM-58817 - End*/
+    //test method for SendPredictionResponse
+      @isTest
+      Public static void SendPredictionResponse_Test(){
+        
+        User user = TestDataFactory.createUser(true);
+        List<Profile> profiles = [SELECT ID From Profile Where Name='BMW Admin' LIMIT 1];
+        user.ProfileID = profiles[0].Id;
+        Update user;
+        
+        list<String> TempName = new List<String>{'Integration_Permission','CKM_Knowledge_AllActions'};
+        List<PermissionSetAssignment> permissionSetList = new List<PermissionSetAssignment>();
+        for(PermissionSet permissionSet : [SELECT Id from PermissionSet WHERE Name IN: TempName]){
+                 PermissionSetAssignment permissionSetAssign = new PermissionSetAssignment(AssigneeId = user.Id, PermissionSetId = permissionSet.Id);
+                  permissionSetList.add(permissionSetAssign);
+          }
+        insert permissionSetList;
+          
+        Map<String,BOSCH_Prediction_Code__mdt> codeMdt =new Map<String,BOSCH_Prediction_Code__mdt>([SELECT Label,DeveloperName,CKM_ID__c,Brand__c FROM BOSCH_Prediction_Code__mdt]);
+        System.runAs(user){  
+            List<Account> lstAccount = TestDataFactory.createAccount(1, false, PERSONACCOUNT_RECORDID);
+            lstAccount[0].BMW_Unit__c = 'DE-NSC';
+            
+         QuickText qt = new QuickText();
+         qt.Name = 'Aftermail V02 BMW und MINI'; qt.Message = 'Hello';
+         insert qt;
+            Knowledge__kav masterKAV = new Knowledge__kav();
+              masterKAV.Title = TITLE;
+              masterKAV.UrlName = UTIL_String.generateRandomString(15);
+              masterKAV.CKM_ArticleNumber__c = /*CKM_ARTICLE_NUMBER*/'000035027';
+              masterKAV.Text_Email__c = CKM_ARTICLE_TEXT;
+            List<Case_Code__c> lstCaseCodes = TestDataFactory.createCaseCode(2, 'DE-NSC', true);
+            List<Case> caseList = TestDataFactory.createNewCase(10, false);
+            for(Case case1 : caseList){
+                case1.AccountId = lstAccount[0].Id;
+                case1.Case_Code__c = lstCaseCodes[0].Id;
+                case1.BMW_Unit__c = 'DE-NSC';
+                case1.Brand__c = 'BMW';
+            }
+         Test.startTest();
+          insert lstAccount;
+          insert masterKAV;
+          Insert caseList;   
+            for(Case case1:caseList){
+                case1.Prediction_code__c = 'COZMO_001_BMW';
+            }
+            update caseList;
+            system.debug('code112'+caseList[0].Prediction_code__c);
+        Test.stopTest();
+        
+        for(Case oCase : [Select Id , Prediction_code__c  from case where Id IN : caseList])
+           System.assertEquals('COZMO_001_BMW', oCase.Prediction_code__c);
+
+        }
+    }
+    
+    static testmethod void checkIfCaseCostTaskExistsTest()
+    {
+        Test.startTest();
+        CaseUtility handlerObj = new CaseUtility();
+        Id recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByDeveloperName().get('PersonAccount').getRecordTypeId();
+        Account myTestAccount = new Account(FirstName = 'Robby ', LastName = 'Naish', PersonEmail = 'any@anydomain.com', RecordTypeId = recordTypeId);
+        insert myTestAccount;
+        Case caseTest1 = new case(subject = 'Test Case2', Origin = 'Phone', Status='Waiting for Dealer',Brand__c = 'BMW');
+        insert caseTest1;
+        List<Case> lstoldCase011 = new list<Case>();
+        lstoldCase011.add(caseTest1);
+        Task oTask= new Task(WhatId =caseTest1.id,Case__c=caseTest1.id, Priority = 'Normal', Status = 'Completed', Activity_Type__c='Case Cost',Subject = '1st call back',Description='1st call back attempt');
+        insert oTask;
+        caseTest1.Complaint_Solution__c = 'Case Cost occurs';
+        update caseTest1;        
+        handlerObj.checkIfCaseCostTaskExists(lstoldCase011, null, null, null);
+        system.assertEquals('Case Cost occurs',caseTest1.Complaint_Solution__c);
+        system.assertEquals('Test Case2',caseTest1.subject);
+        Test.stopTest();
+    }
+    //Start WHCRM-75464 (Epic: WHCRM-62219)
+    //test method for checkIfCaseCostTaskExists_ExcludedBmwUnit
+    static testmethod void checkIfCaseCostTaskExists_ExcludedBmwUnit_Test()
+    {
+        Test.startTest();
+        CaseUtility handlerObj = new CaseUtility();
+        Case caseTest1 = new case(subject = 'Test Case', Origin = 'Phone', Status='Waiting for Dealer',Brand__c = 'BMW');
+        insert caseTest1;
+        List<Case> lstoldCase011 = new list<Case>();
+        lstoldCase011.add(caseTest1);
+        caseTest1.Complaint_Solution__c = 'Case Cost occurs';
+        caseTest1.BMW_Unit__c = Constants.bmwUnit_MXNSC; //WHCRM-83431-CHANGE BMW UNIT TO MXNSC
+        update caseTest1;
+        handlerObj.checkIfCaseCostTaskExists(lstoldCase011, null, null, null);
+        system.assertEquals('Case Cost occurs',caseTest1.Complaint_Solution__c, 'Case to be updated for excluded BMW Units without any task');
+        Test.stopTest();
+    }       
+    //End WHCRM-75464 (Epic: WHCRM-62219)
+    @isTest
+    Public static void updateCaseTransferStatusToRetail_Test(){
+        List<Case> caseList = new List<Case>();
+        Case caseTest2 = new case(subject = 'Test Case2', Description = 'Test Case2', Origin = 'Phone', Status='In Progress',Brand__c = 'BMW', Case_Transfer_Status__c = 'Wholesale', Type = 'Complaint');
+        caseList.add(caseTest2);
+        Test.startTest();
+        insert caseList;
+
+                
+        caseTest2.Case_Transfer_Status__c = Constants.sCaseTransferStatusRetail;
+        update caseTest2;
+        Test.stopTest();
+        
+        system.debug('kkk'+caseTest2);
+        List<Case> olistCase = [SELECT Id , Status, Case_Transfer_Status__c FROM Case WHERE Id IN :caseList];
+        System.debug('mmmm'+olistCase);
+        
+        for (Case c : olistCase){           
+            system.assertEquals(c.Status, 'Waiting for Dealer');
+        }          
+    }
+    
+    @isTest
+    
+    Public static void updateStatusToRetail_Test(){
+        List<Case> caseList = new List<Case>();
+        Case caseTest = new case(subject = 'Test Case', Description = 'Test Case', Origin = 'Phone', Status='In Progress',Brand__c = 'BMW', Case_Transfer_Status__c = 'Wholesale', Type = 'Complaint');        
+        caseList.add(caseTest);
+        Test.startTest(); 
+        insert caseList;
+        
+               
+        caseTest.Status = Constants.sCaseStatusWaitingForDealer;
+        update caseTest;
+        Test.stopTest();   
+        
+        List<Case> olistCase = [SELECT Id , Status, Case_Transfer_Status__c FROM Case WHERE Id IN :caseList];
+        System.debug('nnnn'+olistCase);
+        
+        for (Case c : olistCase){
+            system.assertEquals('Retail' , c.Case_Transfer_Status__c);            
+            system.assertNotEquals(null,c.Status );            
+        }
+    }
+    //Start WHCRM-77429
+    @isTest
+    Public static void updateTechnicalStatusTest(){
+        List<Case> caseList = new List<Case>();
+        Case caseTest = new case(subject = 'Test Case', Description = 'Test Case', Origin = 'Phone', Status='Waiting for Dealer',Brand__c = 'BMW', Case_Transfer_Status__c = 'Retail', Type = 'Complaint');        
+        caseList.add(caseTest);
+        insert caseList;
+        
+        Test.startTest();        
+        caseTest.Status = Constants.sCaseStatusInProgress;
+        caseTest.Case_Transfer_Status__c = Constants.sCaseTransferStatusWholesale;
+        update caseTest;
+        
+        List<Case> oCaseList = [SELECT Id , Status, Case_Transfer_Status__c FROM Case WHERE Id IN :caseList];
+        System.debug(oCaseList);
+        
+        for (Case c : oCaseList){
+            system.assertEquals(c.Case_Transfer_Status__c, 'Wholesale');   
+            system.assertEquals(c.Status, 'In Progress');
+        }        
+        Test.stopTest();
+    }
+    
+    //End WHCRM-77429
+    //WHCRM-79850
+    @isTest
+    static void checkForLightningThreadID(){
+        Profile oProfile = [Select Id, Name from Profile where Name = 'BMW Admin'];
+        User oUser = TestDataFactory.createUser(false);
+        oUser.UserName = 'autoproc12345@bmw.com';
+        oUser.BMW_Unit__c = 'DE-NSC';
+        oUser.ProfileId = oProfile.Id;
+        insert oUser;
+        PermissionSet permissionSet = [SELECT Id from PermissionSet WHERE Name IN (:Constants.sIntegration_Cust_Per )];
+        PermissionSetAssignment permissionSetAssign = new PermissionSetAssignment(AssigneeId = oUser.Id, PermissionSetId = permissionSet.Id);
+        insert permissionSetAssign;
+       
+        
+        system.runAs(oUser){
+            Asset assetTest = new Asset(Name ='TestAsset1',VIN_Long__c='WBA12345671234567', Brand__c = 'BMW',License_Number__c = '2222', ModelDescription__c = 'Test Desc1');
+            insert assetTest;
+            List<Case> oCase =  TestDataFactory.createNewCase(1,false);
+            oCase[0].Subject = 'Test Lightning Thread Functionality';
+            oCase[0].Status = Constants.sCaseStatusNew;
+            oCase[0].Ignore_Validation_Rule__c = true;
+            oCase[0].Business_Area__c = 'DIGITAL SERVICES';
+            oCase[0].BMW_Unit__c = 'DE-NSC';
+            Test.startTest();
+            insert oCase;  
+            Messaging.InboundEmail email = new Messaging.InboundEmail();
+            email.subject = EmailMessages.getFormattedThreadingToken(oCase[0].Id);
+            Messaging.InboundEnvelope env = new Messaging.InboundEnvelope();
+            env.fromAddress = 'testInbound@abc.com';
+          
+             
+            Messaging.InboundEmailResult result = handleInboundEmail(email, env);
+                for(EmailMessage emsg : [Select ParentId from EmailMessage limit 1]){
+                    System.assertEquals(oCase[0].Id,emsg.ParentId);
+                }
+                Test.stopTest();
+            system.assertNotEquals(null, email.subject);
+            system.assertEquals('DE-NSC', ocase[0].BMW_Unit__c);
+          }
+
+    }
+    
+    public static Messaging.InboundEmailResult handleInboundEmail(Messaging.inboundEmail email,Messaging.InboundEnvelope env){
+        Messaging.InboundEmailResult result = new Messaging.InboundEmailResult();
+        result.success = true;
+        return result;
+    }
+    public static List<Case_Code__c> createCaseCode(Integer numofCaseCodes ,String Market, Boolean doInsert) {
+        List<Case_Code__c> lstCaseCode= new List<Case_Code__c>();
+        for(integer i =0; i<numofCaseCodes; i++){
+            Case_Code__c case1 = new Case_Code__c();
+            case1.Level_1__c = 'Level1'+i;
+            case1.Level_2__c = 'Level2'+i;
+            case1.Level_3__c = 'Level3'+i;
+            case1.Active__c = true;
+            case1.BMW_Unit__c = Market;
+            case1.Market_Identifier__c = Market+'_0373'+i;
+            lstCaseCode.add(case1);
+        }
+        if(doInsert){
+            try{
+                insert lstCaseCode;             
+            }
+            catch(DmlException e) {
+                System.debug('The following exception has occurred: ' + e.getMessage()); 
+            }
+        }
+        return lstCaseCode;
+    }
+}
