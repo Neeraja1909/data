@@ -1,0 +1,74 @@
+public with sharing class DocumentDeletionController {
+    private static final String BMW_UNIT = 'BE-NFSC'; //WHCRM-89088:To store BMW Unit to send file type
+    private static String CASE_BMW_UNIT = NULL; //WHCRM-89088
+    private static list<string> SupportedFileExtension = new list<string>{'pdf','msg','jpg','png','jpeg','docx','doc','xls','bmp','tif','tiff','rtf','gif','xlsx','txt'};
+    private static list<string> SupportedFileType = new list<string>{'bpm','BPM','DOC','doc','DOCX','docx','Eform','EFORM','EML','eml','gif','GIF','HTML','html','JPEG','jpeg','JPG','jpg','PDF','pdf','PDF FILE','PDF File','png','PNG','tif','TIF','TIFF','tiff','txt','TXT','XLS','xls','XLSX','xlsx',''};
+            
+            
+    public static Boolean enableDeleteButton(){
+        Boolean user_has_permission = false;
+        
+        List<PermissionSetAssignment> psgAssignmentList = [SELECT AssigneeId, PermissionSetGroupId, PermissionSetGroup.DeveloperName 
+                                                           FROM PermissionSetAssignment WHERE 
+                                                           AssigneeId =:Userinfo.getUserId() AND PermissionSetGroupId != null
+                                                           AND (PermissionSetGroup.DeveloperName = 'BMW_UK_CIC_NFSC_Manager_Permission_Set_Group' 
+                                                                OR PermissionSetGroup.DeveloperName = 'UKNFSC_Senior_Agent_Permission_Set_Group'
+                                                                OR PermissionSetGroup.DeveloperName = 'BMW_UK_NFSC_Junior_Agent_Permission_Set_Group')];
+        return psgAssignmentList.isEmpty() ? false : true;
+            
+    }
+    
+    @AuraEnabled(cacheable=true)
+    public static List<UnsupportedFilesWrappr> getUnsupportedDocuments(String caseId){
+        List<ContentDocumentLink> contentDocumentList = new List<ContentDocumentLink>();
+        List<UnsupportedFilesWrappr> ufwList = new List<UnsupportedFilesWrappr>();
+        List<Id> linkedEntityIds = new List<Id>{caseId};
+        Boolean user_has_permission = enableDeleteButton();
+        system.debug('user_has_permission:::'+user_has_permission);
+        if(String.isNotBlank(caseId)){            
+            for(EmailMessage em : [select Id from EmailMessage where parentId =:caseId]){
+                if(em != null)
+                {
+                    linkedEntityIds.add(em.Id);
+                }
+            }
+            CASE_BMW_UNIT = [Select bmw_unit__c from Case where Id=:caseId].bmw_unit__c;
+            system.debug('###CASE_BMW_UNIT: ' + CASE_BMW_UNIT);
+            if(BMW_UNIT.contains(CASE_BMW_UNIT)){
+                contentDocumentList = [SELECT Id,ContentDocumentId,ContentDocument.title,ShareType,ContentDocument.FileType,LinkedEntityId,ContentDocument.LatestPublishedVersion.UploadFailureReason__c, ContentDocument.LatestPublishedVersion.Upload_Status__c FROM ContentDocumentLink where LinkedEntityId In :linkedEntityIds AND ContentDocument.FileExtension Not IN :SupportedFileType  WITH SECURITY_ENFORCED];
+            }
+            else{
+                contentDocumentList = [SELECT Id,ContentDocumentId,ContentDocument.title,ShareType,ContentDocument.FileType,LinkedEntityId,ContentDocument.LatestPublishedVersion.UploadFailureReason__c, ContentDocument.LatestPublishedVersion.Upload_Status__c FROM ContentDocumentLink where LinkedEntityId In :linkedEntityIds AND ContentDocument.FileExtension Not IN :SupportedFileExtension  WITH SECURITY_ENFORCED];
+            }
+            
+            for(ContentDocumentLink cdLink : contentDocumentList){
+                UnsupportedFilesWrappr ufw = new UnsupportedFilesWrappr();
+                system.debug(cdLink.ContentDocument.title+' ::cdLink.ContentDocument.LatestPublishedVersion.Upload_Status__c::'+cdLink.ContentDocument.LatestPublishedVersion.Upload_Status__c);
+                ufw.diasableDelete = !(cdLink.ContentDocument.LatestPublishedVersion.Upload_Status__c && user_has_permission);
+                ufw.cdLink = cdLink;
+                ufwList.add(ufw);
+            }
+        }
+        system.debug('ufwList>>>>'+ufwList);
+        return ufwList;
+    }
+    
+    @AuraEnabled
+    public static String deleteDocumentsById(String docId){
+        String message = '';
+        try{
+            if(String.isNotBlank(docId)) delete [SELECT Id FROM ContentDocument Where Id =: docId];
+            return 'success';
+        }Catch(Exception e){
+            return 'Error : '+e.getMessage(); 
+        }
+        
+    }
+    
+    public class UnsupportedFilesWrappr{
+        @AuraEnabled
+        public Boolean diasableDelete{get;set;}
+        @AuraEnabled
+        public ContentDocumentLink cdLink{get;set;}
+    }
+}
