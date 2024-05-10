@@ -1,0 +1,510 @@
+@RestResource(urlMapping='/UpsertRetailCustomerService/*' )
+global class UpsertRetailCustomerService {
+    //Wrapper Class for Response
+    global class ResponseWrapper {
+        Global String SuccessMessage;
+        Global String BusinessError;
+        
+    }
+    
+    @HttpPost
+    global static  List<responseWrapper> UpsertAccount(){
+        RestRequest req = RestContext.request;
+        List<responseWrapper> responseJSON = new List<responseWrapper>(); //responseWrapper object for API response
+        String jsonrequest = req.requestBody.toString();
+        system.debug('JSON :: ' + jsonrequest);
+        //De-serializing the data for json format.
+        Map<String,Object> objectsRequest = (Map<String,Object>)system.json.deserializeUntyped(jsonrequest);
+        System.debug('json+++'+objectsRequest);
+        List<Object> requestdata = (List<Object>)objectsRequest.get('UpsertRetailCustomerService');
+        System.debug('jsonreq+++'+requestdata);
+        
+        List<String> sUCIDs = new List<String>();
+        List<String> sGCIDs = new List<String>();
+        List<String> sTopDriveNumbers = new List<String>();
+        List<String> sBunos = new List<String>();
+        List<String> sSA2Numbers = new List<String>();
+        string sBuno;
+        string sSA2Number;
+        string sBuno_SA2Number;
+        string sGCID;
+        string sUCID;
+        string sTDID;
+        
+        List<Account>lstAccToBeUpdated = new List<Account>();
+        List<Account>lstAccToBeInserted = new List<Account>();
+        List<Account> lstPersonAccount = new List<Account>();
+        List<Account> lstBusinessAccount = new List<Account>();
+        List<String> lstPersonAccFields = new List<String>();
+        List<String> lstBusinessAccFields = new List<String>();
+        Map<String,String> accountReferenceFields = new Map<String,String>();
+        Map<String,Account> mapAccountGCID = new Map<String,Account>();
+        Map<String,Account> mapAccountUCID = new Map<String,Account>();
+        Map<String,Account> mapAccountTDID = new Map<String,Account>();
+        Map<String, Schema.SObjectField> MapAccountField;
+        MapAccountField = Schema.SObjectType.Account.fields.getMap();
+        Map<String,Integer> RequestMap = new Map<String,Integer>();
+        
+        RecordType personAccountRecordType =  [SELECT Id FROM RecordType WHERE Name = 'Person Account' and SObjectType = 'Account'];
+        system.debug('recordTypeId:'+personAccountRecordType);
+        
+        
+        System.debug('Map ::'+objectsRequest);
+        for(Object fieldsData : requestdata){
+            Map <string,object> dataForSearch = (Map <string,object>) fieldsData;
+            
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('UCID__c')))){
+                sUCIDs.add(String.valueOf(dataForSearch.get('UCID__c')));
+                sUCID = String.valueOf(dataForSearch.get('UCID__c'));                
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('GCID__c')))){
+                sGCIDs.add(String.valueOf(dataForSearch.get('GCID__c')));
+                sGCID = String.valueOf(dataForSearch.get('GCID__c'));
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('TopDrive_Business_ID__c')))){
+                sTopDriveNumbers.add(String.valueOf(dataForSearch.get('TopDrive_Business_ID__c')));
+                sTDID = String.valueOf(dataForSearch.get('TopDrive_Business_ID__c'));
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('Buno')))){
+                sBuno = String.valueOf(dataForSearch.get('Buno'));
+                sBunos.add(sBuno);
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('SA2_Number')))){
+                sSA2Number = String.valueOf(dataForSearch.get('SA2_Number'));
+                sSA2Numbers.add(sSA2Number);
+            }
+            requestMap.put(sBuno+'#-'+sSA2Number+'#-'+sGCID+'#-'+sUCID+'#-'+sTDID,1);
+        }
+        
+        for(Shareable_Account_Handling__mdt shrMdt : [Select Label,Allowed_Fields__c From Shareable_Account_Handling__mdt]){
+            accountReferenceFields.put(shrMdt.Label,shrMdt.Allowed_Fields__c);
+        }
+        
+        if(accountReferenceFields.containsKey('Person')){
+            lstPersonAccFields = accountReferenceFields.get('Person').split(',');
+        }
+        if(accountReferenceFields.containsKey('Business')){
+            lstBusinessAccFields = accountReferenceFields.get('Business').split(',');
+        }
+        //Added Customer Type field-WHCRM-44293
+        //Added Private_Address_Validated__c,Work_Address_Validated__c for WHCRM-57288
+        //WHCRM-57411 Added Source_of_private_Address__c,Source_of_Work_Address__c  
+        //Retrieving Person Accounts
+        lstPersonAccount = [Select id,FirstName,LastName,Salutation,Additional_Name__c,PersonBirthdate,Customer_Title__c,PersonMailingStreet,PersonOtherStreet,
+                            PersonMailingAddress_Street_Name__c,PersonOtherAddress_Street_Name__c,PersonMailingCity,PersonOtherCity,PersonMailingPostalCode,
+                            PersonOtherPostalCode,PersonMailingCountry,PersonOtherCountry,PersonMailingAddress_House_Number__c,PersonOtherAddress_House_Number__c,
+                            Change_Date_of_Work_Address__c,Change_Date_of_Private_Address__c,Last_Modified_System__c,PersonHomePhone,PersonOtherPhone,PersonMobilePhone,
+                            Fax,PersonEmail,Business_Email__pc,Business_mobile_phone__c,TopDrive_Business_ID__c,GCID__c,UCID__c,LastModifiedDate,Self_employed_Flag__c,Customer_Type__c,VAT_No__c,Company__c,
+                            Private_Address_Validated__c,Work_Address_Validated__c,Source_of_private_Address__c,Source_of_Work_Address__c,Created_by_Source__c
+                            //from Account where (UCID__c IN : sUCIDs OR GCID__c IN : sGCIDs OR TopDrive_Business_ID__c IN : sTopDriveNumbers) AND isPersonAccount = True];
+                            from Account where ((GCID__c != null and GCID__c = : sGCID) OR (TopDrive_Business_ID__c != null and TopDrive_Business_ID__c = : sTDID) OR (UCID__c != null and UCID__c = : sUCID)) 
+                            AND isPersonAccount = True];//WHCRM-55848 added fields
+        
+         //Added Customer Type field-WHCRM-44293        
+        //Added Additional_Address_Validated__c,Validated__c for WHCRM-57288            
+        //WHCRM-57411 Added Source_of_Business_Address__c,Source_of_Additional_Address__c               
+        //Retrieving Business Accounts
+        lstBusinessAccount = [Select id,Name,BillingStreet,ShippingStreet,Billing_Street_Name__c,Shipping_Street_Name__c,BillingCity,ShippingCity,BillingPostalCode,
+                              ShippingPostalCode,BillingCountry,ShippingCountry,Billing_House_Number__c,Shipping_House_Number__c,Change_Date_of_Business_Address__c,
+                              Change_Date_of_Additional_Address__c,Last_Modified_System__c,Last_Modified_Date__c,Phone,Business_mobile_phone__c,Corporate_Business_Email__c,
+                              Additional_Corporate_Mobile_Phone__c,Additional_Phone__c,TopDrive_Business_ID__c,GCID__c,UCID__c,LastModifiedDate,Self_employed_Flag__c,Customer_Type__c,VAT_No__c,
+                              Additional_Address_Validated__c,Validated__c,Source_of_Business_Address__c,Source_of_Additional_Address__c,Created_by_Source__c
+                              //from Account where (UCID__c IN : sUCIDs OR GCID__c IN : sGCIDs OR TopDrive_Business_ID__c IN : sTopDriveNumbers) AND isPersonAccount = False];
+                              from Account where ((GCID__c != null and GCID__c = : sGCID) OR (TopDrive_Business_ID__c != null and TopDrive_Business_ID__c = : sTDID) OR (UCID__c != null and UCID__c = : sUCID))
+                              AND isPersonAccount = False]; //WHCRM-55848 VAT fields
+
+        
+        for(Account acc: lstPersonAccount){
+            mapAccountGCID.put(acc.GCID__c,acc);
+            mapAccountUCID.put(acc.UCID__c,acc);
+            mapAccountTDID.put(acc.TopDrive_Business_ID__c,acc);
+        }
+        for(Account acc: lstBusinessAccount){
+            mapAccountGCID.put(acc.GCID__c,acc);
+            mapAccountUCID.put(acc.UCID__c,acc);
+            mapAccountTDID.put(acc.TopDrive_Business_ID__c,acc);
+        }
+        integer duration = [Select id,duration__c from UpsertRetailCustomerDuration__c].duration__c.intValue();
+        for(Object fieldsData : requestdata){
+            
+            Map <string,object> dataForSearch = (Map <string,object>) fieldsData;
+            
+            String recordType = String.valueOf(dataForSearch.get('RecordType'));
+            string reqFirstName;
+            string reqLastName;
+            string reqBuno;
+            String createdbySource; //Added WHCRM-62683 - Pavan
+            Date existingAccLastModDate;
+            Date today;   
+            Integer monthsBetween;
+            string GCID;
+            string UCID;
+            string TDID;
+            
+            Account existingAcc;
+            Account newAcc = new Account();
+            ResponseWrapper RespObj = new ResponseWrapper();
+            
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('GCID__c')))){
+                GCID = String.valueOf(dataForSearch.get('GCID__c'));
+                existingAcc = mapAccountGCID.get(GCID);
+                system.debug('existingAcc GCID:'+existingAcc);
+            }
+            else if(String.isNotBlank (String.valueOf(dataForSearch.get('TopDrive_Business_ID__c')))){
+                TDID = String.valueOf(dataForSearch.get('TopDrive_Business_ID__c'));
+                existingAcc = mapAccountTDID.get(TDID);
+                system.debug('existingAcc TDID:'+existingAcc);
+            }
+            else if(String.isNotBlank (String.valueOf(dataForSearch.get('UCID__c')))){
+                UCID = String.valueOf(dataForSearch.get('UCID__c'));
+                existingAcc = mapAccountUCID.get(UCID);
+                system.debug('existingAcc UCID:'+existingAcc);
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('FirstName')))){
+                reqFirstName = String.valueOf(dataForSearch.get('FirstName'));
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('LastName')))){
+                reqLastName = String.valueOf(dataForSearch.get('LastName'));
+            }
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('Buno')))){
+                reqBuno = String.valueOf(dataForSearch.get('Buno'));
+            }
+            //Start Added WHCRM-62683 - Pavan
+            if(String.isNotBlank (String.valueOf(dataForSearch.get('Created_by_Source__c')))){
+                createdbySource = String.valueOf(dataForSearch.get('Created_by_Source__c'));
+            }
+			//End Added WHCRM-62683 - Pavan
+            Map<String, Object> accFields = new Map<String,Object>();
+            if(existingAcc != null){
+                //getting Account's populated fields
+                accFields = existingAcc.getPopulatedFieldsAsMap();
+                system.debug('accFields:'+accFields);
+                existingAccLastModDate = existingAcc.lastModifiedDate.date();
+                today = system.today();
+                //Calculating diff between today and Account last modified date
+                monthsBetween = existingAccLastModDate.monthsBetween(today);
+                system.debug('monthsBetween:'+monthsBetween);
+            }
+            
+            //Discarding Whole update if Account is updated in last 3 months
+            if(monthsBetween < duration){
+                RespObj.SuccessMessage = '201';
+                RespObj.BusinessError = 'Update not accepted because account was updated within last 3 months';
+                responseJSON.add(RespObj);
+            }else{
+                //Processing Business Accounts
+                if(recordType =='Business')
+                {  
+                    for(String fieldName : lstBusinessAccFields){
+                        String reqFieldName;
+                        
+                        if(String.isNotBlank(String.valueOf(dataForSearch.get(fieldName)))){
+                            reqFieldName = String.valueOf(dataForSearch.get(fieldName));
+                        }
+                        CreateORUpdateAccount(fieldName,reqBuno,createdbySource,reqFieldName,existingAcc,newAcc,accFields,MapAccountField);
+                    }
+                    
+                    if(existingAcc != null){                       
+                        lstAccToBeUpdated.add(existingAcc);
+                        //RespObj.successMessage = '201';
+                    }
+                    else if(newAcc != null){
+                        lstAccToBeInserted.add(newAcc);
+                        // RespObj.successMessage = '201';
+                    } 
+                }
+                //Processing Person Accounts
+                else if(recordType == 'Person')
+                {
+                    //Discarding whole update since FirstName and Lastname cannot be changed simultaniously 
+                    if(existingAcc != null && existingAcc.FirstName != reqFirstName && existingAcc.LastName != reqLastName)
+                    {
+                        RespObj.SuccessMessage = '201';
+                        RespObj.BusinessError = 'firstname and lastname cannot be changed at the same time';
+                        system.debug('Error: firstname and lastname cannot be changed at the same time');
+                        responseJSON.add(RespObj);
+                    }else{
+                        for(String fieldName : lstPersonAccFields)
+                        {
+                            String reqFieldName;
+                            if(String.isNotBlank(String.valueOf(dataForSearch.get(fieldName)))){
+                                reqFieldName = String.valueOf(dataForSearch.get(fieldName));
+                                
+                            }
+                            CreateORUpdateAccount(fieldName,reqBuno,createdbySource,reqFieldName,existingAcc,newAcc,accFields,MapAccountField);
+                        }
+                        
+                        if(existingAcc != null)
+                        {
+                            lstAccToBeUpdated.add(existingAcc);
+                            //RespObj.successMessage = '201';
+                        }
+                        else if(newAcc != null)
+                        {
+                            newAcc.recordType = personAccountRecordType;
+                            lstAccToBeInserted.add(newAcc);
+                            //RespObj.successMessage = '201';
+                        }
+                    }
+                }
+            }
+        }
+        if(!lstAccToBeUpdated.isEmpty()){
+            ResponseWrapper RespObj = new ResponseWrapper();
+            try{
+                Database.SaveResult[] updatedAccList = database.update(lstAccToBeUpdated,true);
+                CreateORUpdateADR(updatedAccList,sBunos,requestMap);
+                RespObj.successMessage = '201';
+                responseJSON.add(RespObj);                
+            }catch(Exception e){
+                System.debug('Exception occured while updating record :'+e.getMessage()+'Cause: '+e.getCause());
+                string errorMessageUp=e.getMessage();
+                string spliterrorMessageUp='';
+                if(spliterrorMessageUp<>null&&spliterrorMessageUp.containsIgnoreCase('first error:')){
+                    spliterrorMessageUp=errorMessageUp.split('first error:')[1];
+                }
+                else {
+                    spliterrorMessageUp=e.getMessage();
+                }
+                RespObj.BusinessError = 'Exception occured while updating record :'+e.getMessage();
+                responseJSON.add(RespObj);
+            }
+        }
+        if(!lstAccToBeInserted.isEmpty()){
+            ResponseWrapper RespObj = new ResponseWrapper();
+            try{
+                Database.SaveResult[] insertedAccList = database.insert(lstAccToBeInserted,true);
+                CreateORUpdateADR(insertedAccList,sBunos,requestMap);
+                RespObj.successMessage = '201';
+                responseJSON.add(RespObj);
+            }catch(Exception e){
+                System.debug('Exception occured while Inserting record :'+e.getMessage()+'Cause: '+e.getCause());
+                string errorMessage=e.getMessage();
+                string spliterrorMessage='';
+                if(spliterrorMessage<>null&&spliterrorMessage.containsIgnoreCase('first error:')){
+                    spliterrorMessage=errorMessage.split('first error:')[1];
+                }
+                else {
+                    spliterrorMessage=e.getMessage();
+                }
+                    
+                RespObj.BusinessError = 'Exception occured while inserting record :'+spliterrorMessage;
+                
+                responseJSON.add(RespObj);
+            }
+        }
+        return responseJSON;
+        
+    }
+    
+    public static void CreateORUpdateAccount(string fieldName,String reqBuno,String createdbySource,string reqFieldName,Account existingAcc,Account newAcc,Map<String,Object> accFields,Map<String,Schema.SObjectField>MapAccountField){
+        
+        Schema.SObjectField field = MapAccountField.get(fieldName);
+        Schema.DisplayType FldType = field.getDescribe().getType();
+        //WHCRM-61608-Added condition && fieldName!='TopDrive_Business_ID__c' && fieldName!='GCID__c' && fieldName!='UCID__c' to prevent updates on unique identifier fields from SA2/RSP
+        //Updating Account with Request data
+        //WHCRM-73629 Added Created_by_Source__c field to avoid update it when the account is existing in SFDC
+        if(existingAcc != null && reqFieldName != null && fieldName!='TopDrive_Business_ID__c' && fieldName!='GCID__c' && fieldName != 'Created_by_Source__c' )
+        {
+            if(accFields.containskey(fieldName) && accFields.get(fieldName) != reqFieldName)
+            {
+                System.debug('field name is ' + fieldName + ', value is ' + reqFieldName);
+                
+                //Converting string to Date type for Salesforce Date fields
+                if(string.valueof(FldType) == 'DATE'){
+                    existingAcc.put(fieldName,Date.valueof(reqFieldName));
+                }
+                //Converting string to Date/Time type for Salesforce Date/Time fields
+                else if(string.valueof(FldType) == 'DATETIME'){
+                    existingAcc.put(fieldName,Datetime.valueof(reqFieldName));
+                }
+                //Converting string to Boolean type for Salesforce checkbox fields
+                else if(string.valueof(FldType) == 'BOOLEAN'){
+                    boolean bBool;
+                        switch on reqFieldName{
+                            when 'true' {bBool =  true;}
+                            when 'false' {bBool =  false;}
+                            when else {bBool =  null;}}
+                    existingAcc.put(fieldName,bBool);
+                }else{
+                    existingAcc.put(fieldName,reqFieldName); 
+                }
+            }else if(!accFields.containskey(fieldName))
+            {   
+                //Converting string to Date type for Salesforce Date fields
+                if(string.valueof(FldType) == 'DATE'){
+                    existingAcc.put(fieldName,Date.valueof(reqFieldName));
+                }
+                //Converting string to Date/Time type for Salesforce Date/Time fields
+                else if(string.valueof(FldType) == 'DATETIME'){
+                    existingAcc.put(fieldName,Datetime.valueof(reqFieldName));
+                }
+                //Converting string to Boolean type for Salesforce checkbox fields
+                else if(string.valueof(FldType) == 'BOOLEAN'){
+                    boolean bBool;
+                        switch on reqFieldName{
+                            when 'true' {bBool =  true;}
+                            when 'false' {bBool =  false;}
+                            when else {bBool =  null;}}
+                    existingAcc.put(fieldName,bBool);
+                }else{
+                    existingAcc.put(fieldName,reqFieldName); 
+                }
+            }
+            if(reqBuno != null){
+                existingAcc.Technical_System_Source__c = 'DLR-'+reqBuno;  
+            }
+        }
+        //Account not found,creating new Account
+        else if(existingAcc == null && reqFieldName != null)
+        {
+            if(reqBuno != null){
+                newAcc.Technical_System_Source__c = 'DLR-'+reqBuno;
+                //newAcc.Created_by_Source__c = 'DLR-'+reqBuno;
+                newAcc.Created_by_Source__c = createdbySource; //Added WHCRM-62683 - Pavan
+
+            }
+            if(string.valueof(FldType) == 'DATE'){
+                newAcc.put(fieldName,Date.valueof(reqFieldName));
+            }
+            //Converting string to Date/Time type for Salesforce Date/Time fields
+            else if(string.valueof(FldType) == 'DATETIME'){
+                newAcc.put(fieldName,Datetime.valueof(reqFieldName));
+            }
+            //Converting string to Boolean type for Salesforce checkbox fields
+            else if(string.valueof(FldType) == 'BOOLEAN'){
+               boolean bBool;
+                        switch on reqFieldName{
+                            when 'true' {bBool =  true;}
+                            when 'false' {bBool =  false;}
+                            when else {bBool =  null;}}
+                newAcc.put(fieldName,bBool);
+            }else{
+                newAcc.put(fieldName,reqFieldName); 
+            }
+        }
+    }
+    public static void CreateORUpdateADR(List<Database.SaveResult>accList, List<string>sBunos, Map<String,integer>requestMap){
+        
+        list<Account_Dealer_Relation__c> lstADRToBeInserted = new List<Account_Dealer_Relation__c>();
+        list<Account_Dealer_Relation__c> lstADRToBeUpdated = new List<Account_Dealer_Relation__c>();
+        map<String, string> mapAccountId = new Map <String,String>();
+        map<string, string> mapBunoId = new map<string,string>();
+        map<String,Account_Dealer_Relation__c> mapOfBunoADR = new map<String,Account_Dealer_Relation__c>();
+        Set<String> setWithContactReportingADR = new Set<String>();
+        set<Id>setAccId = new Set<Id>();
+        Map<Id,Account> accMap = new Map<Id,Account>();
+        for(Database.SaveResult sr : accList){
+            if(sr.isSuccess()){ 
+                setAccId.add(sr.id); 
+            }
+        }
+        list<Account>lstAccounts = [Select id,GCID__c,UCID__c,BMW_Unit__c,TopDrive_Business_ID__c from Account where Id IN :setAccId];
+        system.debug('lstAccounts:'+lstAccounts);
+        
+        list<DealerOutlet__c> lstDealerOutlets = [Select id, Buno__c from DealerOutlet__c where Buno__c IN : sBunos];
+        system.debug('lstDealerOutlets:'+lstDealerOutlets);
+        
+        list<Account_Dealer_Relation__c> lstADR = [Select id,Related_Account__c,Dealer_Outlet__r.Buno__c,SA_Retail_Dealer_Number__c,Relationship_Type__c From Account_Dealer_Relation__c 
+                                                   where End_Date__c = null AND Dealer_Outlet__c IN : lstDealerOutlets AND Related_Account__c IN : lstAccounts];
+        
+        
+        for(Account_Dealer_Relation__c oADR : lstADR){
+            mapOfBunoADR.put(oADR.Dealer_Outlet__r.Buno__c+'-'+oADR.Related_Account__c,oADR);  
+            //Added new control to check if Contact-reporting Dealer relation is already pressent on account for specific buno before creating new one defect WHCRM-50728
+            if(oADR.Relationship_Type__c == Constants.sContactReportingDealer) {
+                setWithContactReportingADR.add(oADR.Dealer_Outlet__r.Buno__c+'-'+oADR.Related_Account__c);
+        }
+        }
+        
+        for(Account acc :lstAccounts){
+            mapAccountId.put(acc.TopDrive_Business_ID__c,acc.Id);
+            mapAccountId.put(acc.UCID__c,acc.Id);
+            mapAccountId.put(acc.GCID__c,acc.Id);
+            accMap.put(acc.Id,acc);
+        }
+        system.debug('mapAccountId'+mapAccountId);
+        for(DealerOutlet__c dealer : lstDealerOutlets){
+            mapBunoId.put(dealer.Buno__c,dealer.Id);  
+        }
+        system.debug('mapBunoId:'+mapBunoId);
+        string[] relationshipType = new String[]{'Sales Dealer','Preferred Dealer','Contact-reporting Dealer'};
+            for(String str:RequestMap.keyset()){ //sBuno+'#-'+sSA2Number+'#-'+sGCID+'#-'+sUCID+'#-'+sTDID
+                
+                system.debug('RequestMap:'+RequestMap.keyset());
+                String[] arrStrReqData = str.split('#-');
+                string Buno = arrStrReqData[0]=='null'?null:arrStrReqData[0];
+                string SA2Number = arrStrReqData[1]=='null'?null:arrStrReqData[1];
+                string GCID = arrStrReqData[2]=='null'?null:arrStrReqData[2];
+                string UCID = arrStrReqData[3]=='null'?null:arrStrReqData[3];
+                string TDID = arrStrReqData[4]=='null'?null:arrStrReqData[4];
+                
+                string accId;                
+                string dealerOutletId = mapBunoId.get(Buno);
+                if(GCID != null){
+                    accId= mapAccountId.get(GCID);
+                }else if(UCID != null){
+                    accId= mapAccountId.get(UCID);  
+                }else if(TDID != null){
+                    accId= mapAccountId.get(TDID);  
+                }
+                system.debug('accId:'+accId);
+                if(mapOfBunoADR.containsKey(Buno+'-'+accId)){
+                    for(Account_Dealer_Relation__c adr : lstADR){
+                        if(adr.Related_Account__c == accId && adr.Dealer_Outlet__c == dealerOutletId)
+                        {
+                            if( relationshipType.contains(adr.Relationship_Type__c) && adr.SA_Retail_Dealer_Number__c != SA2Number){
+                                adr.SA_Retail_Dealer_Number__c = SA2Number;
+                                lstADRToBeUpdated.add(adr);
+                            }    
+                            if(adr.Relationship_Type__c == 'Preferred Dealer' || adr.Relationship_Type__c == 'Geographical Dealer'){
+                                if(adr.Relationship_Type__c == 'Geographical Dealer'){
+                                    adr.End_Date__c = system.today();
+                                    lstADRToBeUpdated.add(adr);
+                                }
+                                //Added new control to check if Contact-reporting Dealer relation is already pressent on account for specific buno before creating new one defect WHCRM-50728
+                                if(!setWithContactReportingADR.contains(Buno+'-'+accId)){
+                                    Account_Dealer_Relation__c newADR = new Account_Dealer_Relation__c();
+                                    newADR.Dealer_Outlet__c = dealerOutletId;
+                                    newADR.Related_Account__c = accId;
+                                    //WHCRM-80401/80610 Delivery Dealer mapping for CA and MX
+                                    if(accMap.get(accId).BMW_Unit__c ==Constants.bmwUnit_CANSC ||  accMap.get(accId).BMW_Unit__c ==Constants.bmwUnit_MXNSC){
+                                    	newADR.Relationship_Type__c ='Delivery Dealer';
+                                    }
+                                    else{
+                                    	newADR.Relationship_Type__c = 'Contact-reporting Dealer';
+                                    }
+                                    newADR.SA_Retail_Dealer_Number__c = SA2Number;
+                                    newADR.Start_Date__c = system.today();
+                                    lstADRToBeInserted.add(newADR);
+                                    setWithContactReportingADR.add(Buno+'-'+accId);
+                                }
+                            }
+                        } 
+                    }
+                }
+                else if(!mapOfBunoADR.containsKey(Buno+'-'+accId) && accId != null){
+                    Account_Dealer_Relation__c newADR = new Account_Dealer_Relation__c();
+                    newADR.Dealer_Outlet__c = dealerOutletId;
+                    newADR.Related_Account__c = accId;
+                    //WHCRM-80401/80610 Delivery Dealer mapping for CA and MX
+                    if(accMap.get(accId).BMW_Unit__c ==Constants.bmwUnit_CANSC ||  accMap.get(accId).BMW_Unit__c ==Constants.bmwUnit_MXNSC){
+                    	newADR.Relationship_Type__c ='Delivery Dealer';
+                    }
+                    else{
+                        newADR.Relationship_Type__c = 'Contact-reporting Dealer';
+                    }
+                    newADR.SA_Retail_Dealer_Number__c = SA2Number;
+                    newADR.Start_Date__c = system.today();
+                    
+                    lstADRToBeInserted.add(newADR);
+                }
+            }
+        if(!lstADRToBeInserted.isEmpty()){
+            database.insert(lstADRToBeInserted,false); 
+        }
+        if(!lstADRToBeUpdated.isEmpty()){
+            database.update(lstADRToBeUpdated,false); 
+        }
+    }
+}
